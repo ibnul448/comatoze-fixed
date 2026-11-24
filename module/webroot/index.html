@@ -288,6 +288,8 @@ nav button.pop svg{animation:pop .32s ease-out}
 .tx-seg{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px}.tx-seg.two{grid-template-columns:1fr 1fr;margin:4px 0 0}
 .tx-seg button{height:54px;border-radius:99px;border:1px solid var(--ln);background:var(--s2);color:var(--tx);font:inherit;font-size:19px;font-weight:800;transition:all .2s}
 .tx-seg.two button{height:58px;font-size:20px}
+.tx-seg.three{grid-template-columns:repeat(3,1fr);margin:4px 0 0}.tx-seg.three button{height:58px;font-size:19px}
+.tx-note{margin:10px 4px 0;font-size:12.5px;color:var(--mu);min-height:16px}
 .tx-seg button.on{background:var(--ac);color:var(--on);border-color:var(--ac);box-shadow:0 6px 18px color-mix(in srgb,var(--ac) 40%,transparent);transform:scale(1.02)}
 .tx-onrow{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--ln)}.tx-onrow b{display:block;font-size:17px;font-weight:800}.tx-onrow small{display:block;margin-top:2px;font-size:12.5px;color:var(--mu)}#txbody{transition:opacity .25s,filter .25s}#txbody.off{opacity:.4;filter:grayscale(1)}.tx-b.r.offb{background:rgba(255,255,255,.78);color:#333}.tx-b.r.offb i{background:#777;animation:none}.tx-b em{font-style:normal}
 .tx-info{display:flex;gap:14px;align-items:flex-start}.tx-i{flex:none;width:26px;height:26px;border-radius:50%;background:var(--ac);color:var(--on);font-weight:900;display:flex;align-items:center;justify-content:center;margin-top:2px}.tx-info b{display:block;font-size:15px}.tx-info p{margin:2px 0 0;font-size:13px;color:var(--mu);line-height:1.45}
@@ -889,8 +891,8 @@ function parse(t){
     else if(a[0]==='FP'){const n=x=>parseInt(x)||0;s.fp={on:a[1]==='on',act:a[2]==='1',tot:n(a[3]),cpu:n(a[4]),gpu:n(a[5]),idle:n(a[6]),sc:n(a[7]),sg:n(a[8]),si:n(a[9])};}
     else if(a[0]==='GPCFG')s.gpcfg={mode:a[1]||'perf',hz:parseInt(a[2])||120};
     else if(a[0]==='COLOR')s.color={sat:+a[1]||100,r:+a[2]||100,g:+a[3]||100,b:+a[4]||100};
-    else if(a[0]==='TEX'){s.tex={};(a[1]||'').split(';').filter(Boolean).forEach(x=>{const y=x.split('~');s.tex[y[0]]={l:+y[1]||4,s:y[2]==='pixel'?'pixel':'blur'};});}
-    else if(a[0]==='ANGLE')s.ang={style:a[1]||'blok',ok:a[2]==='yes',apps:(a[3]||'').split(';').filter(Boolean)};
+    else if(a[0]==='TEX'){s.tex={};(a[1]||'').split(';').filter(Boolean).forEach(x=>{const y=x.split('~');s.tex[y[0]]={l:+y[1]||4,s:(y[2]==='pixel'||y[2]==='blok')?y[2]:'blur'};});}
+    else if(a[0]==='ANGLE')s.ang={ok:a[2]==='yes',apps:(a[3]||'').split(';').filter(Boolean)};
     else if(a[0]==='GFX')s.gfx={scale:+a[1]||100,drv:a[2]||'default',angle:a[3]||'default'};
     else if(a[0]==='GFXA'){s.gfxApp={};(a[1]||'').split(',').filter(Boolean).forEach(pair=>{const[pk,vv]=pair.split(':');if(pk)s.gfxApp[pk]=+vv;});}
     else if(a[0]==='GAMES')s.games=list(a[1]);
@@ -1180,14 +1182,9 @@ async function pgSet(p,k,v){S.gprof=S.gprof||{};const c=S.gprof[p]=S.gprof[p]||{
 const SCALE_OPTS=[100,90,80,70,60,50,40,30,20,10,1];
 const scaleFmt=v=>v===100?'Normal':v+'%';
 /* ---------- Gaya Tekstur ANGLE (per-app) ---------- */
-const ANG_STYLES=[['blok','Blok','Kotak-kotak ala Minecraft'],['halus','Halus','Tekstur blur & halus'],['plain','ANGLE saja','Hanya ANGLE, tanpa efek tekstur']];
-function angleStyleCard(s){const g=s.ang||{style:'blok',ok:true,apps:[]},a=g.apps||[];prefetchLabels(a);
- const cur=ANG_STYLES.find(x=>x[0]===g.style)||ANG_STYLES[0];
- return `<div class="card"><div class="head">${ico('layers','purple')}<div class="tx"><b>Gaya Tekstur (ANGLE)</b><span>${a.length?a.length+' game memakai ANGLE':'Belum ada game dipilih'}</span></div>
+function angleStyleCard(s){const g=s.ang||{ok:true,apps:[]},a=g.apps||[];prefetchLabels(a);
+ return `<div class="card"><div class="head">${ico('layers','purple')}<div class="tx"><b>ANGLE untuk Game</b><span>${a.length?a.length+' game memakai ANGLE':'Belum ada game dipilih'}</span></div>
    <button class="btn sm" onclick="angOpen()">${IC.plus} Tambah</button></div>
-  <div class="lbl" style="margin-top:14px">Gaya</div>
-  <div class="seg3 tn-purple" data-grp="angst">${ANG_STYLES.map(([k,n])=>`<button class="chip ${g.style===k?'on':''}" onclick="angStyle('${k}',this)">${n}</button>`).join('')}</div>
-  <p class="mu" style="margin:6px 2px 0">${esc(cur[2])}</p>
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 4px"><button class="chip" onclick="angAll()">+ Semua game di daftar</button>${a.length?`<button class="chip" onclick="angClear()">Matikan semua</button>`:''}</div>
   ${a.map(p=>`<div class="app">${appIcon(p)}<div class="n"><b>${esc(labelOf(p))}</b><span>${esc(p)}</span></div><button class="rm" onclick="angDel('${esc(p)}')" aria-label="Hapus">${IC.trash}</button></div>`).join('')}
   ${g.ok?'':'<p class="mu" style="margin:12px 2px 0">ANGLE tidak terdeteksi di perangkat ini.</p>'}</div>`;}
@@ -1628,7 +1625,7 @@ function render(){
   coolWatch();memWatch();setBar();
 }
 /* ---------- UI v2.36: nav 4 tab, menu Tweaks dengan sub-halaman, daftar Aplikasi, dialog radio ---------- */
-const VER='2.98.8';
+const VER='2.98.9';
 IC.home=sv('<path d="M5 12l-2 0l9 -9l9 9l-2 0"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7"/><path d="M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"/>');
 IC.grid=sv('<rect x="4" y="4" width="4" height="4" rx="1"/><rect x="10" y="4" width="4" height="4" rx="1"/><rect x="16" y="4" width="4" height="4" rx="1"/><rect x="4" y="10" width="4" height="4" rx="1"/><rect x="10" y="10" width="4" height="4" rx="1"/><rect x="16" y="10" width="4" height="4" rx="1"/><rect x="4" y="16" width="4" height="4" rx="1"/><rect x="10" y="16" width="4" height="4" rx="1"/><rect x="16" y="16" width="4" height="4" rx="1"/>');
 IC.sliders=sv('<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>');
@@ -1704,7 +1701,7 @@ function gsSpec(p,s){const c=(s.gprof||{})[p]||{mode:'',hz:''},sc=(s.gfxApp||{})
   {k:'drv',ic:'layers',d:'Driver Vulkan untuk semua game di daftar',t:'Driver Grafis',v:DRV_N[g.drv]||'Default',opts:[['default','Default','Bawaan sistem'],['driver','Game Driver','Driver khusus game'],['native','Driver Sistem','Driver native perangkat']],cur:g.drv||'default',fn:v=>gfxSet('drv',v)},
   {k:'api',ic:'layers',d:'Backend OpenGL/Vulkan semua game di daftar',t:'API Grafis',v:API_N[g.angle]||'Default',opts:[['default','Default','Bawaan sistem'],['native','OpenGL Native','Langsung ke driver GPU'],['angle','ANGLE','OpenGL lewat Vulkan']],cur:g.angle||'default',fn:v=>gfxSet('angle',v)},
   {k:'ang',ic:'game',d:'Bawaan Mati. Aktif bisa bikin layar putih / crash di beberapa game',t:'ANGLE Game Ini',v:ang?'Aktif':'Mati',opts:[['off','Mati','Driver bawaan'],['on','Aktif','Render lewat ANGLE']],cur:ang?'on':'off',fn:v=>angToggle(p,v==='on')},
-  {k:'tex',page:'tex',ic:'brush',d:'Level & gaya tekstur (Blur / Pixel) + pratinjau',t:'Kualitas Tekstur',v:tx?'Lv '+tx.l+' · '+(tx.s==='pixel'?'Pixel':'Blur'):'Nonaktif'}]});
+  {k:'tex',page:'tex',ic:'brush',d:'Level & gaya tekstur (Blur / Pixel / Blok) + pratinjau',t:'Kualitas Tekstur',v:tx?'Lv '+tx.l+' · '+(tx.s==='pixel'?'Pixel':tx.s==='blok'?'Blok':'Blur'):'Nonaktif'}]});
  sec.push({t:'Pengaturan Tambahan',tn:'amber',ic:'bolt',rows:[]});
  return sec;}
 function appSub(p,s){const q=esc(p),sp=(s.spoofApps||[]).find(x=>x.pkg===p),sec=gsSpec(p,s);
@@ -1739,7 +1736,8 @@ function texSub(p,s){const c=(s.tex||{})[p];TX.p=p;TX.l=c?c.l:2;TX.s=c?c.s:'blur
   <div class="tx-div" id="txd"><span class="tx-h">${IC.swap||'<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h12l-3-3M17 17H5l3 3"/></svg>'}</span></div><span class="tx-hint">Geser pemisah untuk membandingkan</span></div>
   <div class="card tx-ctl"><div class="tx-onrow"><div><b>Kualitas tekstur</b><small id="txos"></small></div><label class="sw"><input type="checkbox" id="txon" ${TX.on?'checked':''} onchange="texOn(this.checked)"><i></i></label></div><div id="txbody"><div class="tx-row"><b>Texture level</b><span id="txv"></span></div>
    <div class="tx-seg" id="txl">${[1,2,3,4].map(n=>`<button data-l="${n}" onclick="texLvl(${n})">${n}</button>`).join('')}</div>
-   <div class="tx-seg two" id="txs"><button data-s="blur" onclick="texSty('blur')">Blur</button><button data-s="pixel" onclick="texSty('pixel')">Pixel</button></div></div></div>
+   <div class="tx-seg three" id="txs"><button data-s="blur" onclick="texSty('blur')">Blur</button><button data-s="pixel" onclick="texSty('pixel')">Pixel</button><button data-s="blok" onclick="texSty('blok')">Blok</button></div>
+   <p class="tx-note" id="txnote"></p></div></div>
   <div class="card tx-info"><span class="tx-i">i</span><div><b>Informasi</b><p>Game akan dimulai ulang agar berlaku. Level lebih tinggi = tekstur lebih kasar dan FPS lebih ringan. Memakai ANGLE (Vulkan). Game dimulai ulang & hasilnya dicek: bila ANGLE menolak, muncul pesan penyebabnya.</p></div></div>
   <div class="tx-act"><button class="btn ghost" onclick="texDef()">${IC.refresh||''} Nonaktifkan</button><button class="btn" onclick="texDone()">${IC.check||''} Selesai</button></div></div>`;}
 function texArt(){if(TX.art)return TX.art;const W=320,H=200,c=document.createElement('canvas');c.width=W;c.height=H;const g=c.getContext('2d');
@@ -1774,6 +1772,12 @@ function texDraw(){const cv=$('#txc');if(!cv)return;const dpr=Math.min(window.de
   const sg=sm.getContext('2d');sg.imageSmoothingEnabled=true;sg.drawImage(art,0,0,sm.width,sm.height);
   g.imageSmoothingEnabled=true;g.imageSmoothingQuality='high';g.drawImage(sm,0,0,cv.width,cv.height);
   g.globalAlpha=.35;g.filter='blur('+(f*1.2)+'px)';g.drawImage(sm,0,0,cv.width,cv.height);g.filter='none';g.globalAlpha=1;}
+ else if(TX.s==='blok'){ /* blok ala Minecraft: kotak besar, palet sedikit, tiap kotak sedikit bervariasi terang (seperti texel blok) */
+  const pf=7,sm=document.createElement('canvas');sm.width=Math.max(2,Math.round(art.width/pf));sm.height=Math.max(2,Math.round(art.height/pf));
+  const sg=sm.getContext('2d');sg.imageSmoothingEnabled=false;sg.drawImage(art,0,0,sm.width,sm.height);
+  const im=sg.getImageData(0,0,sm.width,sm.height),d=im.data;for(let i=0,k=0;i<d.length;i+=4,k++){const n=((k*2654435761)>>>28)%3-1;for(let c=0;c<3;c++){d[i+c]=Math.max(0,Math.min(255,Math.round(d[i+c]/40)*40+n*6));}}sg.putImageData(im,0,0);
+  g.imageSmoothingEnabled=false;g.drawImage(sm,0,0,cv.width,cv.height);
+ }
  else { /* pixel: kotak tegas, warna dikuantisasi, tepi tajam */
   const pf=f*1.1,sm=document.createElement('canvas');sm.width=Math.max(2,Math.round(art.width/pf));sm.height=Math.max(2,Math.round(art.height/pf));
   const sg=sm.getContext('2d');sg.imageSmoothingEnabled=false;sg.drawImage(art,0,0,sm.width,sm.height);
@@ -1783,13 +1787,13 @@ function texDraw(){const cv=$('#txc');if(!cv)return;const dpr=Math.min(window.de
  g.restore();
  const d=$('#txd');if(d)d.style.left=(TX.x*100)+'%';}
 function texUi(){const v=$('#txv');if(v)v.textContent=TX.l+' · '+TX_N[TX.l-1];document.querySelectorAll('#txl button').forEach(b=>b.classList.toggle('on',TX.on&&+b.dataset.l===TX.l));document.querySelectorAll('#txs button').forEach(b=>b.classList.toggle('on',TX.on&&b.dataset.s===TX.s));
- const bd=$('#txbody');if(bd)bd.classList.toggle('off',!TX.on);const o=$('#txon');if(o)o.checked=TX.on;const os=$('#txos');if(os)os.textContent=TX.on?'Aktif · '+(TX.s==='pixel'?'Pixel':'Blur')+' level '+TX.l:'Nonaktif · tekstur asli game';
- const br=$('#txbr'),bt=$('#txbt');if(br)br.classList.toggle('offb',!TX.on);if(bt)bt.textContent=TX.on?(TX.s==='pixel'?'PIXEL':'BLUR'):'PRATINJAU';texDraw();}
+ const nt=$('#txnote');if(nt)nt.textContent=TX.s==='blok'?'Blok: tekstur kotak besar tanpa penghalusan, selalu level 4 (paling kasar & paling ringan).':TX.s==='pixel'?'Pixel: tepi tajam tanpa penghalusan, kekasaran sesuai level.':'Blur: tekstur dikaburkan halus, kekasaran sesuai level.';const bd=$('#txbody');if(bd)bd.classList.toggle('off',!TX.on);const o=$('#txon');if(o)o.checked=TX.on;const os=$('#txos');if(os)os.textContent=TX.on?'Aktif · '+(TX.s==='pixel'?'Pixel':TX.s==='blok'?'Blok':'Blur')+(TX.s==='blok'?'':' level '+TX.l):'Nonaktif · tekstur asli game';
+ const br=$('#txbr'),bt=$('#txbt');if(br)br.classList.toggle('offb',!TX.on);if(bt)bt.textContent=TX.on?(TX.s==='pixel'?'PIXEL':TX.s==='blok'?'BLOK':'BLUR'):'PRATINJAU';texDraw();}
 function texInit(){texUi();const p=$('#txp');if(!p||p._b)return;p._b=1;let dn=false;const mv=ev=>{const r=p.getBoundingClientRect();TX.x=Math.min(.97,Math.max(.03,(ev.clientX-r.left)/r.width));texDraw();};
  p.addEventListener('pointerdown',ev=>{dn=true;try{p.setPointerCapture(ev.pointerId);}catch(e){}mv(ev);});p.addEventListener('pointermove',ev=>{if(dn)mv(ev);});p.addEventListener('pointerup',()=>{dn=false;});p.addEventListener('pointercancel',()=>{dn=false;});}
 function texOn(v){TX.on=!!v;texUi();}
-function texLvl(n){TX.l=n;TX.on=true;texUi();}
-function texSty(s){TX.s=s;TX.on=true;texUi();}
+function texLvl(n){TX.l=n;TX.on=true;if(TX.s==='blok')TX.s='pixel';texUi();}
+function texSty(s){TX.s=s;TX.on=true;if(s==='blok')TX.l=4;texUi();}
 async function texDone(){const p=TX.p;if(!/^[A-Za-z0-9._]+$/.test(p||''))return;if(!TX.on)return texDef();toast('Menerapkan…');const r=await run(`tex set ${p} ${TX.l} ${TX.s}`);await load();toast((r.out||'').trim().startsWith('OK')?'Tekstur diterapkan · mulai ulang game':'Gagal: '+((r.out||'').split('|')[1]||'tidak ada respon'));closeSub();}
 async function texDef(){const p=TX.p;if(!/^[A-Za-z0-9._]+$/.test(p||''))return;toast('Mengembalikan…');await run('tex off '+p);await load();toast('Tekstur dinonaktifkan · mulai ulang game');closeSub();}
 /* dialog pilihan (kartu radio beranimasi) */

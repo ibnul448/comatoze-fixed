@@ -2142,7 +2142,7 @@ game_fgp(){ # game dari daftar yang sedang di layar -> "paket pid" (deteksi lang
 game_fg(){ set -- $(game_fgp); echo $1; }
 glog(){ echo "$(date +%H:%M:%S) $*" >> $DIR/game.log; [ "$(stat -c %s $DIR/game.log 2>/dev/null || echo 0)" -gt 4096 ] && { tail -n 20 $DIR/game.log > $DIR/game.log.t; mv -f $DIR/game.log.t $DIR/game.log; }; }
 # ---------- CEK VERSI: bukti versi mana yang SEBENARNYA terpasang & jalan (modul, WebUI, aplikasi) ----------
-SCRIPT_VER=2.98.8
+SCRIPT_VER=2.98.9
 ver_check(){
   echo "skrip_berjalan=$SCRIPT_VER ($SELF)"
   for d in /data/adb/modules /data/adb/modules_update; do
@@ -2775,6 +2775,7 @@ angle_ok_r(){ # ANGLE terdeteksi di perangkat? (hanya informasi; bila tidak ada,
 tex_feat(){ v=$(getcfg "TEX_$1"); [ -n "$v" ] || return 1
   l=${v%%|*}; st=${v#*|}; case $l in 1|2|3|4) ;; *) l=4;; esac
   f=forceTextureLodOffset$l; [ "$st" = pixel ] && f=forceNearestFiltering:forceNearestMipFiltering:$f   # nama resmi FeaturesVk ANGLE
+  [ "$st" = blok ] && f=forceNearestFiltering:forceNearestMipFiltering:forceTextureLodOffset4   # Blok (ala Minecraft): texel kotak besar tanpa penghalusan, selalu offset LOD maksimum
   echo $f; }
 tex_forget(){ grep -v "^TEX_$1=" $CFG > $CFG.t 2>/dev/null; mv -f $CFG.t $CFG; grep -v "^TEXA_$1=" $CFG > $CFG.t 2>/dev/null; mv -f $CFG.t $CFG; }
 ANL=$DIR/angle_last.txt   # catatan penggabungan terakhir (untuk diagnosa)
@@ -2833,11 +2834,11 @@ tex_verify(){ # cek hasil nyata: daftar ANGLE sistem memuat paket & properti ove
   case "$_p" in *",$1,"*) ;; *) echo "ERR|sistem menolak daftar ANGLE (angle_gl_driver_selection_pkgs kosong)$(angle_ok_r || echo '; ANGLE tidak terdeteksi di HP ini')"; return 1;; esac
   [ "$_g" = "$_w" ] || { echo "ERR|properti override tidak menempel (baca: ${_g:-kosong}) - ROM memblokir setprop debug.angle"; return 1; }
   echo OK; }
-tex(){ # set <paket> <1-4> <blur|pixel> | off <paket> | cur <paket>
+tex(){ # set <paket> <1-4> <blur|pixel|blok> | off <paket> | cur <paket>
   case $1 in
     set) angle_pkg_ok "$2" || { echo "ERR|nama paket tidak valid"; return 1; }
          case $3 in 1|2|3|4) ;; *) echo "ERR|level 1-4"; return 1;; esac
-         case $4 in blur|pixel) ;; *) echo "ERR|gaya blur atau pixel"; return 1;; esac
+         case $4 in blur|pixel|blok) ;; *) echo "ERR|gaya blur, pixel atau blok"; return 1;; esac
          new=0; [ -f $AAP ] || : > $AAP
          if ! grep -qx "$2" $AAP; then new=1; setcfg "TEXA_$2" 1; echo "$2" >> $AAP; fi
          setcfg "TEX_$2" "$3|$4"; echo "$2" > $DIR/tex_cur
@@ -2952,8 +2953,11 @@ ram_keep(){ _kp="com.comatoze $(game_fg)"
   echo $_kp; }
 # ram_compact: padatkan memori proses yang MASIH hidup (anon -> zram) lewat `cmd activity compact full`, tanpa mematikannya; hasilnya MemAvailable naik besar.
 # Proses di ram_keep (app depan/game, keyboard, launcher) dilewati supaya tidak tersendat. Perintah yang tidak ada di versi Android ini diabaikan.
-ram_compact(){ _keep=" $(ram_keep) "
-  for _n in $(ps -A -o NAME 2>/dev/null | grep '\.' | sort -u | head -n 90); do _b=${_n%%:*}; case "$_keep" in *" $_b "*) continue;; esac
+# HANYA proses milik app pihak ketiga (pm list -3): proses sistem/HAL (audio, composer, media, modem) TIDAK disentuh -- memadatkan HAL audio membuat suara
+# "mesin cukur" ~1 dtk dan hentakan layar. Juga dilewati total bila ada game dari Daftar Game yang sedang berjalan.
+ram_compact(){ _keep=" $(ram_keep) "; _ua=" $(pm list packages -3 2>/dev/null | sed 's/^package://' | tr '\n' ' ') "
+  for _g in $(cat $DIR/games.txt 2>/dev/null); do pidof $_g >/dev/null 2>&1 && return 0; done
+  for _n in $(ps -A -o NAME 2>/dev/null | grep '\.' | sort -u | head -n 90); do _b=${_n%%:*}; case "$_keep" in *" $_b "*) continue;; esac; case "$_ua" in *" $_b "*) ;; *) continue;; esac
     cmd activity compact full "$_n" 0 >/dev/null 2>&1 || am compact full "$_n" 0 >/dev/null 2>&1; done; }
 # ram_purge full|light: full = SANGAT AGRESIF: hentikan semua app pihak ketiga yang berjalan (selain ram_keep) dua putaran (yang hidup lagi dari alarm/service ikut kena),
 # bunuh proses cache, pangkas cache, padatkan proses sisa, lalu buang page cache/slab & padatkan memori kernel dua kali; light = hanya proses cache + cache kernel.
@@ -3127,12 +3131,16 @@ idleram_fast(){ echo $$ > $IDF.pid
   while :; do
     [ "$(getcfg IDLE_RAM)" = on ] || break
     [ -f $DIR/ingame ] && { sleep 4; continue; }
+    _gr=0; for _g in $(cat $DIR/games.txt 2>/dev/null); do pidof $_g >/dev/null 2>&1 && { _gr=1; break; }; done   # game masih hidup (mis. baru dibuka/di latar): jangan bersihkan
+    [ $_gr = 1 ] && { sleep 5; continue; }
+    read -r _up _ < /proc/uptime; _up=${_up%.*}; [ $((_up-${_lastp:-0})) -lt 90 ] && { sleep 3; continue; }   # jeda minimal 90 dtk antar pembersihan penuh (cegah bersih berulang tiap 2 dtk)
     _m=$(getcfg IDLE_MIN); case $_m in ""|*[!0-9]*) _m=2048;; esac
     _t=$(meminfo_kb MemTotal); _t=${_t:-0}; _thr=$((_t*35/100/1024)); [ "$_thr" -lt "$_m" ] && _thr=$_m   # ambang 35% dari total, minimal IDLE_MIN
     _fa=$(meminfo_kb MemAvailable); _fa=$((_fa/1024))
     if [ "$_fa" -lt "$_thr" ]; then
       ram_purge light; _fb=$(meminfo_kb MemAvailable); _fb=$((_fb/1024))
       if [ "$_fb" -lt "$_thr" ]; then ram_purge full; _fb=$(meminfo_kb MemAvailable); _fb=$((_fb/1024)); fi
+      read -r _lastp _ < /proc/uptime; _lastp=${_lastp%.*}
       echo "$(date +%H:%M:%S) [fast] ${_fa}MB < ${_thr}MB -> ${_fb}MB" > $DIR/idleram.last
     fi
     sleep 2
