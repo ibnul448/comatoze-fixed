@@ -43,9 +43,12 @@ fi
 # Hasil di-cache per policy sampai cpuinfo_max berubah atau reboot (c.* dibuang saat boot).
 cpu_top(){ # <dir policy>
   _f=$DIR/c.top.${1##*/}; _im=$(rd $1/cpuinfo_max_freq)
+  # override frekuensi maksimum untuk HP overclock (bila tabel stok tidak memuat nilai OC yang sudah dipatch kernel)
+  _ov=$(getcfg "CPU_MAX_${1##*/}"); [ -n "$_ov" ] || _ov=$(getcfg OVERRIDE_CPU_MAX)
   if [ -f $_f ]; then read -r _ci _ct < $_f; [ "$_ci" = "$_im" ] && { echo $_ct; return; }; fi
   _ct=$(awk -v m="${_im:-0}" '{for(i=1;i<=NF;i++)if($i+0>m)m=$i+0}END{printf "%d",m}' $1/scaling_available_frequencies 2>/dev/null)
   [ "${_ct:-0}" -gt 0 ] || _ct=$_im
+  [ -n "$_ov" ] && [ "$_ov" -gt "$_ct" ] 2>/dev/null && _ct=$_ov   # nilai OC lebih besar dari tabel -> pakai itu
   echo "$_im $_ct" > $_f 2>/dev/null; echo $_ct
 }
 cpu_mode(){
@@ -121,7 +124,8 @@ ged_floor(){
 BSF=$DIR/batsaver_on
 batsaver(){ # mode efektif: eco | perf | balance | custom
   if [ "$(getcfg ECO_BATSAVER)" = off ] || [ "$1" != eco ]; then
-    [ -f $BSF ] && { sput global low_power 0; rm -f $BSF; }
+    sput global low_power 0   # pindah dari Eco = selalu lepas penghemat daya, meski bukan modul yang menyalakannya
+    rm -f $BSF
     return 0
   fi
   [ "$(sget global low_power)" = 1 ] || { sput global low_power 1; [ "$(sget global low_power)" = 1 ] && : > $BSF; }
@@ -209,6 +213,16 @@ perf_extra(){
   pxw /proc/sys/kernel/sched_util_clamp_min_rt_default 30
   pxw /sys/module/workqueue/parameters/power_efficient N
   [ -n "$GPU" ] && [ -f $GPU/polling_interval ] && pxw $GPU/polling_interval 5
+  # Mali device: jadwal & DVFS dipercepat + power policy always_on (frame drop berkurang saat beban naik)
+  if [ -n "$GPU" ]; then
+    for _d in /sys/class/devfreq/*/device; do
+      pxw "$_d/dvfs_period" 50
+      pxw "$_d/js_scheduling_period" 50
+      pxw "$_d/autosuspend_delay_ms" 0
+      [ -e "$_d/power_policy" ] && pxw "$_d/power_policy" always_on
+      for _n in job_timeout_reset soft_job_timeout reset_timeout; do pxw "$_d/$_n" 100000; done
+    done
+  fi
   for c in /sys/devices/system/cpu/cpu[1-9]*/online; do
     [ "$(rd $c)" = "0" ] && pxw $c 1
   done
@@ -770,10 +784,15 @@ touch_on(){
   touch_off   # mulai dari kondisi bersih: nilai asli (termasuk sisa versi lama) dipulihkan dulu, lalu diterapkan ulang
   tb_rp debug.hwui.skip_empty_damage true
   tb_rp debug.hwui.use_hint_manager true
-  tb_rp windowsmgr.max_events_per_sec 240
+  tb_rp windowsmgr.max_events_per_sec 300
   tb_rp ro.min_pointer_dur 1
   tb_rp debug.performance.tuning 1
   tb_rp persist.sys.use_fifo_ui 1
+  tb_rp debug.sf.enable_hwc_vds 1
+  tb_rp debug.sf.show_refresh_rate_overlay 0
+  tb_rp persist.sys.scrollingcache 3
+  tb_rp persist.sys.ui.hw 1
+  tb_rp debug.cpurend.vsync true
   # --- tambahan render/scroll (aman): cache scroll penuh, pipeline HWUI lebih responsif, flush lebih cepat ---
   tb_rp persist.sys.scrollingcache 3
   tb_rp debug.hwui.renderer true
@@ -1510,7 +1529,7 @@ bkt_on(){
   bk_wr $V/oom_dump_tasks 0
   if [ "$big" = 1 ]; then bk_wr $V/dirty_background_ratio 5; bk_wr $V/dirty_ratio 15; bk_wr $V/vfs_cache_pressure 40
   else bk_wr $V/dirty_background_ratio 10; bk_wr $V/dirty_ratio 25; bk_wr $V/vfs_cache_pressure 60; fi
-  # jaringan: BBR bila kernel menyediakan, TCP fast open
+  # jaringan: BBR bila kernel menyediakan, TCP fast open + optimisasi latensi
   case " $(rd /proc/sys/net/ipv4/tcp_available_congestion_control) " in *" bbr "*) bk_wr /proc/sys/net/ipv4/tcp_congestion_control bbr;; esac
   bk_wr /proc/sys/net/ipv4/tcp_fastopen 3
   bk_wr /proc/sys/net/ipv4/tcp_slow_start_after_idle 0
@@ -1518,6 +1537,27 @@ bkt_on(){
   bk_wr /proc/sys/net/ipv4/tcp_no_metrics_save 1
   bk_wr /proc/sys/net/ipv4/tcp_timestamps 0
   bk_wr /proc/sys/net/ipv4/tcp_mtu_probing 1
+  # lebih agresif: window awal besar, keepalive sering, tidak ada rto panjang
+  bk_wr /proc/sys/net/ipv4/tcp_init_cwnd 10
+  bk_wr /proc/sys/net/ipv4/tcp_keepalive_time 30
+  bk_wr /proc/sys/net/ipv4/tcp_keepalive_intvl 5
+  bk_wr /proc/sys/net/ipv4/tcp_keepalive_probes 3
+  bk_wr /proc/sys/net/ipv4/tcp_retrans_collapse 0
+  bk_wr /proc/sys/net/ipv4/tcp_notsent_lowat -1
+  bk_wr /proc/sys/net/ipv4/tcp_early_retrans 3
+  bk_wr /proc/sys/net/ipv4/tcp_frto 0
+  bk_wr /proc/sys/net/ipv4/tcp_tw_reuse 1
+  bk_wr /proc/sys/net/ipv4/tcp_fin_timeout 15
+  # memori: ZRAM lebih agresif (compaction tinggi supaya swap tidak jadi bottleneck)
+  bk_wr $V/swappiness 180
+  bk_wr $V/vfs_cache_pressure 50
+  bk_wr $V/min_free_kbytes $((mt/100))
+  bk_wr $V/watermark_boost_factor 15000
+  # latency / scheduling untuk frame waktu ketat
+  bk_wr $K/sched_util_clamp_min 20
+  bk_wr $K/sched_util_clamp_min_rt_default 10
+  bk_wr $K/sched_util_clamp_max 1024
+  bk_wr $K/sched_wakeup_granularity_ns 250000
 }
 bkt_off(){
   if [ -f $BK.nodes ]; then
@@ -1702,16 +1742,23 @@ smooth_off(){
   done < $SMD
   rm -f $SMD
 }
-wl_apply(){ # on|off: WiFi tanpa scan latar & tanpa tidur (nilai asli disimpan lalu dipulihkan)
+wl_apply(){ # on|off: WiFi latensi rendah + scan latar dimatikan + tanpa tidur (nilai asli disimpan lalu dipulihkan)
   if [ "$1" = on ]; then
     [ "$(getcfg WLO_set)" = 1 ] || { setcfg WLO_ss "$(sget_r global wifi_scan_always_enabled)"; setcfg WLO_sp "$(sget_r global wifi_sleep_policy)"; setcfg WLO_set 1; }
     sput global wifi_scan_always_enabled 0
     sput global wifi_sleep_policy 2
     cmd wifi set-scan-always-available disabled >/dev/null 2>&1
+    cmd wifi set-scan-interval-enabled disabled >/dev/null 2>&1
+    cmd wifi set-channel-set-enabled disabled >/dev/null 2>&1
+    sput global wifi_powersave 0
+    sput global wifi_mbb 0
+    sput global wifi_scan_always_enabled 0
+    sput system wifi_power_save 0
   else
     [ "$(getcfg WLO_set)" = 1 ] || return 0
     v=$(getcfg WLO_ss); if [ -z "$v" ] || [ "$v" = null ]; then sdel global wifi_scan_always_enabled; else sput global wifi_scan_always_enabled "$v"; fi
     v=$(getcfg WLO_sp); if [ -z "$v" ] || [ "$v" = null ]; then sdel global wifi_sleep_policy; else sput global wifi_sleep_policy "$v"; fi
+    sput global wifi_powersave 1 2>/dev/null; sput global wifi_mbb 1 2>/dev/null
     setcfg WLO_set 0
   fi
 }
@@ -2095,7 +2142,7 @@ game_fgp(){ # game dari daftar yang sedang di layar -> "paket pid" (deteksi lang
 game_fg(){ set -- $(game_fgp); echo $1; }
 glog(){ echo "$(date +%H:%M:%S) $*" >> $DIR/game.log; [ "$(stat -c %s $DIR/game.log 2>/dev/null || echo 0)" -gt 4096 ] && { tail -n 20 $DIR/game.log > $DIR/game.log.t; mv -f $DIR/game.log.t $DIR/game.log; }; }
 # ---------- CEK VERSI: bukti versi mana yang SEBENARNYA terpasang & jalan (modul, WebUI, aplikasi) ----------
-SCRIPT_VER=2.98.3
+SCRIPT_VER=2.98.8
 ver_check(){
   echo "skrip_berjalan=$SCRIPT_VER ($SELF)"
   for d in /data/adb/modules /data/adb/modules_update; do
@@ -2254,22 +2301,34 @@ fp_on(){
       fpw $_p/$_g/hispeed_load 25; fpw $_p/$_g/rate_limit_us 0
     done
   done
-  fpw /dev/cpuctl/top-app/cpu.uclamp.min 85.00
+  fpw /dev/cpuctl/top-app/cpu.uclamp.min 90.00
   fpw /dev/cpuctl/top-app/cpu.uclamp.latency_sensitive 1
   fpw /dev/cpuctl/foreground/cpu.uclamp.min 40.00
   _fc=$FPN
   if [ -n "$GPU" ]; then
-    fpw $GPU/polling_interval 4; fpw $GPU/simple_ondemand/upthreshold 40; fpw $GPU/simple_ondemand/downdifferential 45
+    fpw $GPU/polling_interval 2; fpw $GPU/simple_ondemand/upthreshold 35; fpw $GPU/simple_ondemand/downdifferential 50
     # tambahan governor non-simple_ondemand (kalau tersedia)
     [ -e "$GPU/upthreshold" ] && fpw "$GPU/upthreshold" 40
     [ -e "$GPU/downdifferential" ] && fpw "$GPU/downdifferential" 45
     # lantai clock GPU ~75% dari maksimum
     _gf=$(rd $GPU/available_frequencies); _gx=0; for _f in $_gf; do [ "$_f" -gt "$_gx" ] 2>/dev/null && _gx=$_f; done
-    if [ "$_gx" -gt 0 ]; then _gm=$_gx; _lim=$((_gx*75/100)); for _f in $_gf; do [ "$_f" -ge "$_lim" ] && [ "$_f" -lt "$_gm" ] && _gm=$_f; done; fpw $GPU/min_freq $_gm; fi
+    _gov=$(getcfg OVERRIDE_GPU_MAX); [ -n "$_gov" ] && [ "$_gov" -gt "$_gx" ] 2>/dev/null && _gx=$_gov
+    if [ "$_gx" -gt 0 ]; then _gm=$_gx; _lim=$((_gx*85/100)); for _f in $_gf; do [ "$_f" -ge "$_lim" ] && [ "$_f" -lt "$_gm" ] && _gm=$_f; done
+      [ "$_gm" -lt "$_lim" ] && [ "$_gx" -gt 0 ] && _gm=$_gx
+      [ -n "$_gov" ] && fpw $GPU/max_freq $_gov
+      fpw $GPU/min_freq $_gm; fi
     # GED/MediaTek: GPU boost penuh & power policy always_on (bila ada)
     fpw /sys/kernel/ged/hal/gpu_boost_level 0
     for _g in /sys/kernel/ged/hal/current_freqency /proc/perfmgr/ged/current_freqency; do [ -e "$_g" ] && fpw "$_g" 0; done
     [ -e /sys/class/misc/mali0/device/power_policy ] && { grep -q "^/sys/class/misc/mali0/device/power_policy|" $FPV || echo "/sys/class/misc/mali0/device/power_policy|$(cat /sys/class/misc/mali0/device/power_policy 2>/dev/null)" >> $FPV; echo always_on > /sys/class/misc/mali0/device/power_policy 2>/dev/null; }
+    # perangkat Mali: penjadwalan DVFS dipercepat & GPU tidak boleh suspend (penyebab drop frame saat geser layar/perang)
+    for _d in /sys/class/devfreq/*/device; do
+      [ -d "$_d" ] || continue
+      fpw "$_d/dvfs_period" 50
+      fpw "$_d/js_scheduling_period" 50
+      fpw "$_d/power/autosuspend_delay_ms" 0
+      [ -e "$_d/power_policy" ] && fpw "$_d/power_policy" always_on
+    done
   fi
   _fg=$((FPN-_fc)); _f0=$FPN
   for _cp in $CPUD/cpu[0-9]*; do for _st in $_cp/cpuidle/state[1-9]*; do fpw $_st/disable 1; done; done
@@ -2314,7 +2373,10 @@ tpin(){ _pid=$1; [ -d /proc/$_pid ] || return 0; command -v taskset >/dev/null 2
   _mk=$(big_mask) || { rm -f $DIR/tpin.lock; return 0; }
   tp_snap $_pid > $DIR/tp.a; sleep 2; tp_snap $_pid > $DIR/tp.b
   _top=$(awk 'NR==FNR{a[$1]=$2;next} ($1 in a){d=$2-a[$1]; if(d>=20) print d, $1}' $DIR/tp.a $DIR/tp.b | sort -rn | head -n 5 | awk '{print $2}')
-  _n=0; for _t in $_top; do taskset -p $_mk $_t >/dev/null 2>&1 && _n=$((_n+1)); renice -n -8 -p $_t >/dev/null 2>&1; done
+  # semua thread sibuk (bukan cuma 3) dipindah ke inti besar + prioritas maksimal
+  _n=0; for _t in $_top; do taskset -p $_mk $_t >/dev/null 2>&1 && _n=$((_n+1)); renice -n -10 -p $_t >/dev/null 2>&1; done
+  # thread game lain (render/audio) juga diutamakan sedikit supaya tidak kalah dengan sistem
+  for _t in $(ls /proc/$_pid/task 2>/dev/null); do case " $_top " in *" $_t "*) continue;; esac; renice -n -5 -p $_t >/dev/null 2>&1; done
   [ "$_n" -gt 0 ] && glog "thread sibuk -> inti besar (mask $_mk): $_top"
   rm -f $DIR/tpin.lock $DIR/tp.a $DIR/tp.b; }
 game_wd(){
@@ -2838,14 +2900,15 @@ color_set(){ # saturasi% r% g% b%
 color_reset(){ for k in COL_SAT COL_R COL_G COL_B; do grep -v "^$k=" $CFG > $CFG.t; mv $CFG.t $CFG; done; color_apply; echo OK; }
 color_boot(){ [ -n "$(getcfg COL_SAT)$(getcfg COL_R)$(getcfg COL_G)$(getcfg COL_B)" ] && color_apply; return 0; }
 dbg_off(){ cmd looper_stats disable >/dev/null 2>&1; dumpsys binder_calls_stats --disable >/dev/null 2>&1; dumpsys binder_calls_stats --disable-detailed-tracking >/dev/null 2>&1; atrace --async_stop >/dev/null 2>&1
-  # brutal: hentikan tracing kernel + perfetto (traced) yang jalan di latar
-  for _t in /sys/kernel/tracing/tracing_on /sys/kernel/debug/tracing/tracing_on; do [ -w $_t ] && echo 0 > $_t 2>/dev/null; done
+  for _t in /sys/kernel/tracing/tracing_on /sys/kernel/debug/tracing/tracing_on /sys/kernel/tracing/buffer_size_kb /sys/kernel/debug/tracing/buffer_size_kb; do [ -w $_t ] && echo 0 > $_t 2>/dev/null; done
   setprop debug.atrace.tags.enableflags 0 >/dev/null 2>&1
+  setprop log.tag.I 2 >/dev/null 2>&1
+  setprop persist.sys.spc.enabled 0 >/dev/null 2>&1
   mkdir -p $DIR; : > $DIR/dbg.off
-  stop traced_probes >/dev/null 2>&1; stop traced >/dev/null 2>&1
+  for _s in traced traced_probes perfetto; do stop $_s >/dev/null 2>&1; done
   return 0; }
 dbg_on(){ cmd looper_stats enable >/dev/null 2>&1; dumpsys binder_calls_stats --enable >/dev/null 2>&1
-  if [ -f $DIR/dbg.off ]; then start traced >/dev/null 2>&1; start traced_probes >/dev/null 2>&1; rm -f $DIR/dbg.off; fi
+  if [ -f $DIR/dbg.off ]; then start traced >/dev/null 2>&1; start traced_probes >/dev/null 2>&1; start perfetto >/dev/null 2>&1; rm -f $DIR/dbg.off; fi
   return 0; }
 
 # ---------- STATUS (dibaca WebUI) ----------
@@ -3026,13 +3089,15 @@ ue_apply(){ # pkg level
   mkdir -p "$_cd" 2>/dev/null; _f="$_cd/Engine.ini"
   _own=$(stat -c %u:%g "$(dirname "$_cd")" 2>/dev/null)
   if [ ! -f "$_f.comatoze.bak" ] && [ ! -f "$_f.comatoze.new" ]; then if [ -f "$_f" ]; then cp -p "$_f" "$_f.comatoze.bak"; else : > "$_f.comatoze.new"; fi; fi
-  case $2 in 0) _n=0; _sp=75;; 1) _n=1; _sp=85;; 2) _n=2; _sp=100;; 3) _n=3; _sp=100;; 4) _n=3; _sp=100;; esac
+  case $2 in 0) _n=0; _sp=60;; 1) _n=1; _sp=75;; 2) _n=2; _sp=90;; 3) _n=3; _sp=100;; 4) _n=3; _sp=100;; esac
   [ -f "$_f" ] && chmod 644 "$_f" 2>/dev/null
   # buang blok lama kita (jika ada) lalu tulis blok baru
   [ -f "$_f" ] && sed -i '/^; COMATOZE-UE BEGIN/,/^; COMATOZE-UE END/d' "$_f" 2>/dev/null
   { echo; echo "; COMATOZE-UE BEGIN"; echo "[SystemSettings]"
     for _g in ViewDistance AntiAliasing Shadow PostProcess Texture Effects Foliage Shading; do echo "sg.${_g}Quality=$_n"; done
     echo "r.ScreenPercentage=$_sp"
+    [ "$2" -le 2 ] && { echo "r.MotionBlurQuality=0"; echo "r.DepthOfFieldQuality=0"; echo "r.BloomQuality=0"; echo "r.RefractionQuality=0"; }
+    [ "$2" -ge 3 ] && { echo "r.MotionBlurQuality=4"; echo "r.DepthOfFieldQuality=4"; }
     [ "$2" = 4 ] && { echo "r.MaxAnisotropy=16"; echo "r.ViewDistanceScale=1.5"; }
     [ "$2" = 0 ] && { echo "r.ViewDistanceScale=0.6"; echo "r.Shadow.MaxResolution=512"; }
     echo "; COMATOZE-UE END"; } >> "$_f"

@@ -86,16 +86,20 @@ public class StatusService extends Service {
 
         if ("MODE".equals(act)) {
             final String m = intent.getStringExtra("m");
+            if ("thon".equals(m) || "thoff".equals(m)) {
+                shell.send(Root.BIN + " thermal " + ("thon".equals(m) ? "on" : "off") + " </dev/null >/dev/null 2>&1");
+                return START_STICKY;
+            }
             if (m != null && m.matches("perf|plite|balance|eco")) {
                 pendingMode = m;                                   // tampilkan mode baru SEKETIKA, tanpa menunggu skrip selesai
-                pendingUntil = System.currentTimeMillis() + 6000;
+                pendingUntil = System.currentTimeMillis() + 3000;
                 String[] cur = lastArr;
                 if (cur != null) { String[] c2 = cur.clone(); c2[1] = m; render(c2); }
                 shell.send(Root.BIN + " mode " + m + " </dev/null >/dev/null 2>&1");
             }
         } else if ("REC".equals(act)) {   // Berhenti: akhiri sesi rekam ini saja (disimpan); rekaman berikutnya mulai lagi saat game dibuka
             pendingRec = 1;
-            pendingUntil = System.currentTimeMillis() + 6000;
+            pendingUntil = System.currentTimeMillis() + 3000;
             String[] cur = lastArr;
             if (cur != null) { String[] c2 = cur.clone(); if (c2.length > 10) c2[10] = "1"; render(c2); }
             shell.send(Root.BIN + " rec stop </dev/null >/dev/null 2>&1");
@@ -196,6 +200,7 @@ public class StatusService extends Service {
         if (!"perf".equals(mode)) b.addAction(act("Performa", "perf", 1));
         if (!"balance".equals(mode)) b.addAction(act("Seimbang", "balance", 2));
         if (!"eco".equals(mode)) b.addAction(act("Eco", "eco", 3));
+        b.addAction(act(thermalOff ? "Thermal On" : "Thermal Off", thermalOff ? "thon" : "thoff", 4));
         try {
             ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE)).notify(ID, b.build());
         } catch (Throwable ignored) { }

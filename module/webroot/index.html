@@ -1628,7 +1628,7 @@ function render(){
   coolWatch();memWatch();setBar();
 }
 /* ---------- UI v2.36: nav 4 tab, menu Tweaks dengan sub-halaman, daftar Aplikasi, dialog radio ---------- */
-const VER='2.98.3';
+const VER='2.98.8';
 IC.home=sv('<path d="M5 12l-2 0l9 -9l9 9l-2 0"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7"/><path d="M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"/>');
 IC.grid=sv('<rect x="4" y="4" width="4" height="4" rx="1"/><rect x="10" y="4" width="4" height="4" rx="1"/><rect x="16" y="4" width="4" height="4" rx="1"/><rect x="4" y="10" width="4" height="4" rx="1"/><rect x="10" y="10" width="4" height="4" rx="1"/><rect x="16" y="10" width="4" height="4" rx="1"/><rect x="4" y="16" width="4" height="4" rx="1"/><rect x="10" y="16" width="4" height="4" rx="1"/><rect x="16" y="16" width="4" height="4" rx="1"/>');
 IC.sliders=sv('<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>');
@@ -1733,7 +1733,7 @@ async function ueGo(){if(!UE.sel||UE.busy)return;UE.busy=true;toast('Menerapkanâ
 async function ueOff(){if(!UE.sel)return;toast('Mengembalikanâ€¦');const r=await run('ue off '+UE.sel);const g=UE.list.find(x=>x.p===UE.sel);if(g)g.lv=-1;toast(((r&&r.out)||'').trim().split('|')[1]||'Dikembalikan');renderSub();}
 async function ueCompile(){if(!UE.sel)return;const r=await run('ue compile '+UE.sel);toast(((r&&r.out)||'').trim().split('|')[1]||'Rekompilasi berjalan');}
 /* ---- Kualitas Tekstur: pratinjau sebelum/sesudah ---- */
-const TX_N=['Tinggi','Sedang','Rendah','Terendah'],TX_F=[2,4,8,16];let TX={p:null,l:2,s:'blur',x:.5,art:null,on:false};
+const TX_N=['Tinggi','Sedang','Rendah','Terendah','Ekstrim'],TX_F=[2,4,8,16,32];let TX={p:null,l:2,s:'blur',x:.5,art:null,on:false};
 function texSub(p,s){const c=(s.tex||{})[p];TX.p=p;TX.l=c?c.l:2;TX.s=c?c.s:'blur';TX.on=!!c;TX.x=.5;
  return `<div class="tx-page"><div class="tx-prev" id="txp"><canvas id="txc"></canvas><span class="tx-b l"><i></i>ASLI</span><span class="tx-b r" id="txbr"><i></i><em id="txbt">AKTIF</em></span>
   <div class="tx-div" id="txd"><span class="tx-h">${IC.swap||'<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h12l-3-3M17 17H5l3 3"/></svg>'}</span></div><span class="tx-hint">Geser pemisah untuk membandingkan</span></div>
