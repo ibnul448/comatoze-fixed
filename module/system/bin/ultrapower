@@ -2091,7 +2091,7 @@ game_fgp(){ # game dari daftar yang sedang di layar -> "paket pid" (deteksi lang
 game_fg(){ set -- $(game_fgp); echo $1; }
 glog(){ echo "$(date +%H:%M:%S) $*" >> $DIR/game.log; [ "$(stat -c %s $DIR/game.log 2>/dev/null || echo 0)" -gt 4096 ] && { tail -n 20 $DIR/game.log > $DIR/game.log.t; mv -f $DIR/game.log.t $DIR/game.log; }; }
 # ---------- CEK VERSI: bukti versi mana yang SEBENARNYA terpasang & jalan (modul, WebUI, aplikasi) ----------
-SCRIPT_VER=2.98.0
+SCRIPT_VER=2.98.1
 ver_check(){
   echo "skrip_berjalan=$SCRIPT_VER ($SELF)"
   for d in /data/adb/modules /data/adb/modules_update; do
@@ -2316,7 +2316,9 @@ tpin(){ _pid=$1; [ -d /proc/$_pid ] || return 0; command -v taskset >/dev/null 2
 game_wd(){
   echo $$ > $DIR/game.pid; ing=0; dset=0; away=0; lastg=; gpid=
   gp_leave; gth_off; gcam_off; gcall_off; fp_off; rm -f $DIR/ingame   # sisa profil/thermal/kamera/teleponi dari pemantau sebelumnya dipulihkan dulu
-  glog "pemantau mulai"
+  # games.txt kosong -> isi otomatis dari katalog (pm list packages -3) supaya game yang baru diinstall ikut terdeteksi
+  [ -s $DIR/games.txt ] || { games_catalog > $DIR/c.gcat; pm list packages -3 2>/dev/null | sed 's/package://' | grep -Fx -f $DIR/c.gcat > $DIR/games.txt; }
+  glog "pemantau mulai (game: $(grep -c . $DIR/games.txt 2>/dev/null || echo 0))"
   [ "$(getcfg F_preload)" = on ] && ( sleep 30; for p in $(cat $DIR/games.txt 2>/dev/null); do preload $p; done ) &
   while :; do
     if [ "$ing" = 1 ] && [ -n "$gpid" ] && pid_top $gpid; then cur=$lastg   # jalur cepat: game yang sama masih di depan -> nol fork
@@ -2372,6 +2374,7 @@ game_wd(){
   done
 }
 game_sync(){
+  [ -s $DIR/games.txt ] || { games_catalog > $DIR/c.gcat; pm list packages -3 2>/dev/null | sed 's/package://' | grep -Fx -f $DIR/c.gcat > $DIR/games.txt; }
   on=0; for f in preload gamednd gameprofile gameclean gamebypass gamethermal fpsgooff framepace gamecam gamecall; do [ "$(getcfg F_$f)" = on ] && on=1; done
   alive=0; [ -f $DIR/game.pid ] && kill -0 $(cat $DIR/game.pid) 2>/dev/null && alive=1
   tp_want && on=1; rec_want && on=1
@@ -2384,7 +2387,7 @@ game_wd_sup(){
     _p=$([ -f $DIR/game.pid ] && cat $DIR/game.pid 2>/dev/null)
     if [ -n "$_p" ] && kill -0 $_p 2>/dev/null; then sleep 6; continue; fi
     # cek masih perlu pemantau: ada fitur game yang ON
-    _on=0; for f in preload gamednd gameprofile gameclean gamebypass gamethermal fpsgooff framepace; do [ "$(getcfg F_$f)" = on ] && _on=1; done
+    _on=0; for f in preload gamednd gameprofile gameclean gamebypass gamethermal fpsgooff framepace gamecam gamecall; do [ "$(getcfg F_$f)" = on ] && _on=1; done
     tp_want && _on=1; rec_want && _on=1
     [ "$_on" = 1 ] || return 0
     bg game_wd; sleep 6
