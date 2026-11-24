@@ -6,8 +6,8 @@ android {
         applicationId 'com.comatoze'
         minSdk 26
         targetSdk 33
-        versionCode 179
-        versionName '2.97.9'
+        versionCode 180
+        versionName '2.98.0'
     }
     buildTypes {
         release { minifyEnabled false; signingConfig signingConfigs.debug }

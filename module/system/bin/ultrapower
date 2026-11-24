@@ -201,8 +201,8 @@ perf_extra(){
   pxw /proc/sys/kernel/sched_child_runs_first 0
   pxw /proc/sys/kernel/sched_migration_cost_ns 5000000
   # semua task dianggap butuh util tinggi — scheduler langsung ambil clock besar
-  pxw /proc/sys/kernel/sched_util_clamp_min 60
-  pxw /proc/sys/kernel/sched_util_clamp_min_rt_default 40
+  pxw /proc/sys/kernel/sched_util_clamp_min 40
+  pxw /proc/sys/kernel/sched_util_clamp_min_rt_default 30
   pxw /sys/module/workqueue/parameters/power_efficient N
   [ -n "$GPU" ] && [ -f $GPU/polling_interval ] && pxw $GPU/polling_interval 5
   for c in /sys/devices/system/cpu/cpu[1-9]*/online; do
@@ -2069,10 +2069,11 @@ top_tasks(){ # -> "pid pid pid"
   done
   echo ""
 }
-pid_top(){ # <pid>: proses di depan? (ada di cpuctl top-app, ATAU oom_score_adj 0, ATAU top-app di cgroup) - builtin, tanpa fork
+pid_top(){ # <pid>: proses di depan? (cpuctl top-app, cpuset /top-app, oom_score_adj 0, ATAU top-app di cgroup) - builtin, tanpa fork
   case " $(top_tasks) " in *" $1 "*) return 0;; esac
   _a=; read -r _a 2>/dev/null < /proc/$1/oom_score_adj || return 1
   [ "$_a" = 0 ] && return 0
+  _cs=; read -r _cs 2>/dev/null < /proc/$1/cpuset; case "$_cs" in *top-app*) return 0;; esac
   while IFS= read -r _l; do case $_l in *top-app*) return 0;; esac; done 2>/dev/null < /proc/$1/cgroup
   return 1
 }
@@ -2090,7 +2091,7 @@ game_fgp(){ # game dari daftar yang sedang di layar -> "paket pid" (deteksi lang
 game_fg(){ set -- $(game_fgp); echo $1; }
 glog(){ echo "$(date +%H:%M:%S) $*" >> $DIR/game.log; [ "$(stat -c %s $DIR/game.log 2>/dev/null || echo 0)" -gt 4096 ] && { tail -n 20 $DIR/game.log > $DIR/game.log.t; mv -f $DIR/game.log.t $DIR/game.log; }; }
 # ---------- CEK VERSI: bukti versi mana yang SEBENARNYA terpasang & jalan (modul, WebUI, aplikasi) ----------
-SCRIPT_VER=2.97.9
+SCRIPT_VER=2.98.0
 ver_check(){
   echo "skrip_berjalan=$SCRIPT_VER ($SELF)"
   for d in /data/adb/modules /data/adb/modules_update; do
@@ -2273,7 +2274,7 @@ fp_on(){
   if [ -n "$_dv" ]; then case " $(rd $_dv/available_governors) " in *" performance "*) fpw $_dv/governor performance;; esac; fi
   fpp vendor.perf.framepacing.enable 1   # properti frame pacing HAL perf vendor (aman bila HP tidak punya: diabaikan)
   fp_alt
-  [ "$(getcfg FP_SF)" = off ] || { fpp debug.sf.disable_backpressure 1; fpp debug.sf.latch_unsignaled 1; }   # FP_SF=off bila layar berkedip/putih
+  # debug.sf.disable_backpressure & latch_unsignaled = penyebab layar game freeze tapi audio jalan (tidak dipakai)
   echo "$FPN|$_fc|$_fg|$_fi" > $DIR/fp.res; : > $DIR/fp_on
   glog "frame pacing aktif (agresif): $FPN parameter"; }
 fp_off(){
@@ -2285,8 +2286,10 @@ fp_off(){
 fp_want(){ [ "$(getcfg F_framepace)" = on ] && return 0; [ "$(getcfg F_fpsgooff)" = on ] && fpsgo_alt && return 0; [ -f $DIR/ingame ] && [ "$(curmode)" = perf ] && return 0; return 1; }
 fp_later(){ sleep 5; [ -f $DIR/ingame ] && fp_want && fp_on; }   # setelah profil game & tweak performa terpasang (mereka menulis governor/tunable juga)
 fp_support(){ _sc=0; _sg=0; _si=0
-  for _p in $CPU/policy*; do for _g in schedutil sugov_ext walt; do [ -e $_p/$_g/up_rate_limit_us ] && _sc=$((_sc+1)); done; done
-  if [ -n "$GPU" ]; then for _n in polling_interval simple_ondemand/upthreshold simple_ondemand/downdifferential; do [ -e $GPU/$_n ] && _sg=$((_sg+1)); done; fi
+  for _p in $CPU/policy*; do for _g in $_p/*/; do
+    for _n in up_rate_limit_us down_rate_limit_us rate_limit_us hispeed_load; do [ -e "${_g}$_n" ] && _sc=$((_sc+1)); done
+  done; done
+  if [ -n "$GPU" ]; then for _n in polling_interval min_freq max_freq governor simple_ondemand/upthreshold simple_ondemand/downdifferential upthreshold downdifferential; do [ -e $GPU/$_n ] && _sg=$((_sg+1)); done; fi
   for _cp in $CPUD/cpu[0-9]*; do for _st in $_cp/cpuidle/state[1-9]*; do [ -e $_st/disable ] && _si=$((_si+1)); done; done
   echo "$_sc|$_sg|$_si"; }
 # ---------- PRIORITAS THREAD GAME ----------
