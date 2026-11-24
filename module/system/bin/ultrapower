@@ -141,6 +141,10 @@ tweak_auto(){ # mode
 curmode(){ if [ -f $DIR/prof_on ]; then cat $DIR/emode 2>/dev/null; else getcfg MODE; fi; }
 set_mode(){
   rm -f $DIR/pguard $DIR/pcrit   # ganti mode = batas suhu sementara dilepas (penjaga memasangnya lagi bila Performa terlalu panas)
+  # Ganti mode manual oleh pengguna selalu menang atas profil game: lepas profil dulu supaya
+  # mode efektif = MODE (tidak lagi emode). Profil game yang masih di layar akan dipasang lagi
+  # oleh pemantau saat cek berikutnya (~3 dtk) bila memang masih di depan.
+  if [ "$2" != temp ] && [ -f $DIR/prof_on ]; then rm -f $DIR/prof_on; fi
   echo $1 > $DIR/emode
   cpu_mode $1; gpu_mode $1
   batsaver $1
@@ -2091,7 +2095,7 @@ game_fgp(){ # game dari daftar yang sedang di layar -> "paket pid" (deteksi lang
 game_fg(){ set -- $(game_fgp); echo $1; }
 glog(){ echo "$(date +%H:%M:%S) $*" >> $DIR/game.log; [ "$(stat -c %s $DIR/game.log 2>/dev/null || echo 0)" -gt 4096 ] && { tail -n 20 $DIR/game.log > $DIR/game.log.t; mv -f $DIR/game.log.t $DIR/game.log; }; }
 # ---------- CEK VERSI: bukti versi mana yang SEBENARNYA terpasang & jalan (modul, WebUI, aplikasi) ----------
-SCRIPT_VER=2.98.1
+SCRIPT_VER=2.98.3
 ver_check(){
   echo "skrip_berjalan=$SCRIPT_VER ($SELF)"
   for d in /data/adb/modules /data/adb/modules_update; do
@@ -3237,6 +3241,7 @@ case "$1" in
   angle_app) angle_app $2 $3; ui_restart;;
   idleram) idleram $2 $3 $4;;
   idleram_run) idleram_run;;
+  idleram_fast) idleram_fast;;
   uirst) case $2 in on|off) setcfg UI_RST $2; echo "OK|restart UI $2";; now) rm -f $DIR/uirst; setcfg UI_RST on; ui_restart; echo "OK|UI dimuat ulang";; *) echo "UIRST|$(getcfg UI_RST)";; esac;;
   cache) cache_clean;;
   trim) trim_run;;
@@ -3251,6 +3256,7 @@ case "$1" in
   chg_wd) chg_wd;;
   chgreset) chg_reset;;
   game_wd) game_wd;;
+  game_wd_sup) game_wd_sup;;
   probe) probe;;
   qact) qact $2;;
   appperm) app_perm;;
