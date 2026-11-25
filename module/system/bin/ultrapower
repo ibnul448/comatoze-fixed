@@ -2142,7 +2142,7 @@ game_fgp(){ # game dari daftar yang sedang di layar -> "paket pid" (deteksi lang
 game_fg(){ set -- $(game_fgp); echo $1; }
 glog(){ echo "$(date +%H:%M:%S) $*" >> $DIR/game.log; [ "$(stat -c %s $DIR/game.log 2>/dev/null || echo 0)" -gt 4096 ] && { tail -n 20 $DIR/game.log > $DIR/game.log.t; mv -f $DIR/game.log.t $DIR/game.log; }; }
 # ---------- CEK VERSI: bukti versi mana yang SEBENARNYA terpasang & jalan (modul, WebUI, aplikasi) ----------
-SCRIPT_VER=2.98.9
+SCRIPT_VER=2.99.1
 ver_check(){
   echo "skrip_berjalan=$SCRIPT_VER ($SELF)"
   for d in /data/adb/modules /data/adb/modules_update; do
@@ -2203,10 +2203,10 @@ mode_restore(){
   else set_mode $m temp; fi
 }
 # Profil per game: GPM_<paket> (perf|plite|balance|eco|skip) dan GPH_<paket> (Hz); kosong = ikut profil global (GP_MODE/GP_HZ). skip = jangan ubah apa pun untuk game itu.
-gp_enter(){ [ -f $DIR/prof_on ] && return
+gp_enter(){ [ -f $DIR/prof_on ] && [ -n "$(cat $DIR/prof_on 2>/dev/null)" ] && [ "$(cat $DIR/prof_on)" = "$1" ] && return
   gm=$(getcfg "GPM_$1"); gh=$(getcfg "GPH_$1")
   [ "$gm" = skip ] && return 0
-  touch $DIR/prof_on
+  echo "$1" > $DIR/prof_on
   [ -n "$gm" ] || gm=$(getcfg GP_MODE); [ -n "$gh" ] || gh=$(getcfg GP_HZ)
   set_mode ${gm:-perf} temp   # set_mode sudah memasang Hz modenya (Performa 120 / Balance 90 / Eco 60) dan mengunci mode layar
   [ -n "$gh" ] && { gh=$(hz_snap $gh); [ -n "$gh" ] && refresh $gh q >/dev/null; }   # Hz pilihan game menimpa Hz mode; tanpa pilihan -> ikut Hz mode
@@ -2219,8 +2219,13 @@ gp_game(){ # <paket> <mode|-> <hz|->  : simpan profil satu game ("-" = ikut glob
   case $2 in -|perf|plite|balance|eco|skip) ;; *) echo "ERR|mode tidak dikenal"; return 1;; esac
   case $3 in -|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]) ;; *) echo "ERR|Hz tidak valid"; return 1;; esac
   m=$2; h=$3; [ "$m" = - ] && m=; [ "$h" = - ] && h=
-  setcfg "GPM_$1" "$m"; setcfg "GPH_$1" "$h"; echo OK
+  setcfg "GPM_$1" "$m"; setcfg "GPH_$1" "$h"
+  # pengaturan per-game sebelumnya hanya jalan bila fitur "Profil Otomatis Game" ON dan baru terbaca saat game dibuka ulang -> sekarang pemantau dipastikan hidup & profil langsung diterapkan bila game itu sedang dimainkan
+  game_sync
+  [ "$(cat $DIR/ingame 2>/dev/null)" = "$1" ] && ( rm -f $DIR/prof_on; gp_enter "$1" ) </dev/null >/dev/null 2>&1 &
+  echo OK
 }
+gp_any(){ grep -qE '^GP[MH]_[A-Za-z0-9_.]+=[a-z0-9]' $CFG 2>/dev/null; }   # ada game yang punya profil sendiri
 gp_leave(){ [ -f $DIR/prof_on ] || return; rm -f $DIR/prof_on; mode_restore; }
 # Thermal otomatis saat game (fitur gamethermal): masuk game -> thermal dimatikan SEMENTARA ("temp" = tidak mengubah setelan THERMAL yang tersimpan),
 # keluar game -> dihidupkan lagi. Bila pengguna memang mematikan thermal secara permanen (THERMAL=off), tidak ada yang diubah dan tidak dihidupkan balik.
@@ -2261,6 +2266,7 @@ fpw(){ # node nilai
   [ -e "$1" ] || return 0
   _fo=$(cat "$1" 2>/dev/null); [ -n "$_fo" ] || return 0
   grep -q "^$1|" $FPV 2>/dev/null || echo "$1|$_fo" >> $FPV
+  [ "$_fo" = "$2" ] && { FPN=$((FPN+1)); return 0; }   # sudah bernilai sama (penegasan tiap 30 dtk): jangan ditulis ulang, menulis ulang node GPU/DVFS berulang bisa memicu glitch/crash
   chmod 644 "$1" 2>/dev/null; echo "$2" > "$1" 2>/dev/null
   [ "$(cat "$1" 2>/dev/null)" = "$2" ] && FPN=$((FPN+1))
   return 0; }
@@ -2335,6 +2341,10 @@ fp_on(){
   _fi=$((FPN-_f0))
   _dv=$(ls -d /sys/class/devfreq/*dvfsrc* 2>/dev/null | head -1)
   if [ -n "$_dv" ]; then case " $(rd $_dv/available_governors) " in *" performance "*) fpw $_dv/governor performance;; esac; fi
+  # penstabil frame tambahan (semua dipulihkan saat keluar game lewat $FPV): kurangi stall kswapd/kompaksi, overhead statistik & perf kernel
+  fpw /proc/sys/vm/watermark_boost_factor 0; fpw /proc/sys/vm/page-cluster 0; fpw /proc/sys/vm/stat_interval 10
+  fpw /proc/sys/kernel/sched_schedstats 0; fpw /proc/sys/kernel/perf_cpu_time_max_percent 5; fpw /proc/sys/kernel/perf_event_max_sample_rate 1000
+  fpw /proc/sys/vm/dirty_writeback_centisecs 3000; fpw /proc/sys/vm/dirty_expire_centisecs 6000
   fpp vendor.perf.framepacing.enable 1   # properti frame pacing HAL perf vendor (aman bila HP tidak punya: diabaikan)
   fp_alt
   # debug.sf.disable_backpressure & latch_unsignaled = penyebab layar game freeze tapi audio jalan (tidak dipakai)
@@ -2360,23 +2370,28 @@ fp_support(){ _sc=0; _sg=0; _si=0
 # Setiap ~30 dtk: ukur 2 dtk, ambil 3 thread TERSIBUK dari proses game, kunci ke inti tercepat (cluster big) + naikkan prioritasnya.
 # Thread lain dibiarkan bebas (tidak ada pin massal). Dilewati bila HP hanya punya satu cluster atau taskset tidak ada.
 tp_want(){ [ "$(getcfg F_threadpin)" != off ]; }
-big_mask(){ _bf=0; _bc=
+big_mask(){ _bf=0; _lo=999999999; _cl=
   for _p in /sys/devices/system/cpu/cpufreq/policy*; do _mf=; _ac=; read -r _mf 2>/dev/null < $_p/cpuinfo_max_freq; read -r _ac 2>/dev/null < $_p/affected_cpus
     case $_mf in ''|*[!0-9]*) continue;; esac
-    [ "$_mf" -gt "$_bf" ] && { _bf=$_mf; _bc=$_ac; }; done
-  _lo=$_bf; for _p in /sys/devices/system/cpu/cpufreq/policy*; do _mf=; read -r _mf 2>/dev/null < $_p/cpuinfo_max_freq; case $_mf in ''|*[!0-9]*) continue;; esac; [ "$_mf" -lt "$_lo" ] && _lo=$_mf; done
+    [ "$_mf" -gt "$_bf" ] && _bf=$_mf; [ "$_mf" -lt "$_lo" ] && _lo=$_mf
+    _cl="$_cl $_mf:$(echo $_ac | tr ' ' ,)"; done
   [ "$_lo" = "$_bf" ] && return 1   # satu cluster: tidak ada gunanya
-  _m=0; for _c in $_bc; do _m=$((_m | (1 << _c))); done; printf '%x' $_m; }
+  _m=0; for _e in $_cl; do [ "${_e%%:*}" -gt "$_lo" ] || continue; for _c in $(echo "${_e#*:}" | tr , ' '); do _m=$((_m | (1 << _c))); done; done   # semua cluster di atas yang terendah (sedang+prime), bukan 2 inti saja
+  printf '%x' $_m; }
 tp_snap(){ awk '{sub(/^.*\) /,""); n=split(FILENAME,a,"/"); print a[n-1], $12+$13}' /proc/$1/task/*/stat 2>/dev/null; }
 tpin(){ _pid=$1; [ -d /proc/$_pid ] || return 0; command -v taskset >/dev/null 2>&1 || return 0
   [ -f $DIR/tpin.lock ] && return 0; : > $DIR/tpin.lock
   _mk=$(big_mask) || { rm -f $DIR/tpin.lock; return 0; }
   tp_snap $_pid > $DIR/tp.a; sleep 2; tp_snap $_pid > $DIR/tp.b
-  _top=$(awk 'NR==FNR{a[$1]=$2;next} ($1 in a){d=$2-a[$1]; if(d>=20) print d, $1}' $DIR/tp.a $DIR/tp.b | sort -rn | head -n 5 | awk '{print $2}')
-  # semua thread sibuk (bukan cuma 3) dipindah ke inti besar + prioritas maksimal
-  _n=0; for _t in $_top; do taskset -p $_mk $_t >/dev/null 2>&1 && _n=$((_n+1)); renice -n -10 -p $_t >/dev/null 2>&1; done
-  # thread game lain (render/audio) juga diutamakan sedikit supaya tidak kalah dengan sistem
-  for _t in $(ls /proc/$_pid/task 2>/dev/null); do case " $_top " in *" $_t "*) continue;; esac; renice -n -5 -p $_t >/dev/null 2>&1; done
+  _top=$(awk 'NR==FNR{a[$1]=$2;next} ($1 in a){d=$2-a[$1]; if(d>=20) print d, $1}' $DIR/tp.a $DIR/tp.b | sort -rn | head -n 6 | awk '{print $2}')
+  # hanya 3 thread tersibuk, BUKAN thread audio/mixer (pin audio ke inti sibuk = underrun = suara "mesin cukur"); inti = semua cluster cepat, bukan 2 inti saja
+  _n=0; _top2=
+  for _t in $_top; do [ "$_n" -ge 3 ] && break
+    _nm=$(cat /proc/$_pid/task/$_t/comm 2>/dev/null)
+    case $_nm in *[Aa]udio*|*AAudio*|*FMOD*|*[Oo]boe*|*[Mm]ixer*|*[Ss]ound*|*Wwise*|*AK*|*Binder*|*HwBinder*) continue;; esac
+    taskset -p $_mk $_t >/dev/null 2>&1 && { _n=$((_n+1)); _top2="$_top2 $_t"; }
+    renice -n -4 -p $_t >/dev/null 2>&1; done
+  _top=$_top2
   [ "$_n" -gt 0 ] && glog "thread sibuk -> inti besar (mask $_mk): $_top"
   rm -f $DIR/tpin.lock $DIR/tp.a $DIR/tp.b; }
 game_wd(){
@@ -2410,10 +2425,10 @@ game_wd(){
         # Tindakan berat DITUNDA 8 dtk: saat game baru dibuka ia sedang memuat aset; ganti mode/Hz/kill/IO di detik pertama bisa membuatnya mati ('mental').
         ( sleep 8; [ -f $DIR/ingame ] || exit 0
           _t=0; while [ "$(game_fg)" != "$cur" ]; do   # deteksi di depan bisa sesaat gagal (shade/dialog): coba lagi sampai 4x sebelum menyerah
-            _t=$((_t+1)); [ $_t -ge 4 ] && { glog "profil game dilewati: $cur tidak terbaca di depan"; exit 0; }
+            _t=$((_t+1)); [ $_t -ge 10 ] && { glog "profil game dilewati: $cur tidak terbaca di depan"; exit 0; }
             sleep 3; [ -f $DIR/ingame ] || exit 0; done
           [ -f $PXV2 ] && perf_x_game
-          [ "$(getcfg F_gameprofile)" = on ] && gp_enter $cur
+          { [ "$(getcfg F_gameprofile)" = on ] || [ -n "$(getcfg GPM_$cur)$(getcfg GPH_$cur)" ]; } && gp_enter $cur
           fp_want && fp_on
           rec_want && bgx rec_run "$cur"
           [ "$(getcfg F_gameclean)" = on ] && { sleep 15; [ "$(game_fg)" = "$cur" ] && gclean $cur; }
@@ -2421,7 +2436,7 @@ game_wd(){
       elif [ "$cur" != "$lastg" ]; then   # pindah langsung ke game lain di daftar: terapkan profil game barunya
         lastg=$cur; echo "$cur" > $DIR/ingame; [ -s $AAP ] && tex_cur $cur
         rec_want && ( sleep 8; bgx rec_run "$cur" ) </dev/null >/dev/null 2>&1 &
-        if [ "$(getcfg F_gameprofile)" = on ]; then gp_leave; gp_enter $cur; fi
+        if [ "$(getcfg F_gameprofile)" = on ] || [ -n "$(getcfg GPM_$cur)$(getcfg GPH_$cur)" ]; then gp_leave; gp_enter $cur; fi
         fp_want && fp_later &
       fi
     elif [ "$ing" = 1 ]; then
@@ -2441,7 +2456,7 @@ game_wd(){
 }
 game_sync(){
   [ -s $DIR/games.txt ] || { games_catalog > $DIR/c.gcat; pm list packages -3 2>/dev/null | sed 's/package://' | grep -Fx -f $DIR/c.gcat > $DIR/games.txt; }
-  on=0; for f in preload gamednd gameprofile gameclean gamebypass gamethermal fpsgooff framepace gamecam gamecall; do [ "$(getcfg F_$f)" = on ] && on=1; done
+  on=0; for f in preload gamednd gameprofile gameclean gamebypass gamethermal fpsgooff framepace gamecam gamecall; do [ "$(getcfg F_$f)" = on ] && on=1; done; gp_any && on=1
   alive=0; [ -f $DIR/game.pid ] && kill -0 $(cat $DIR/game.pid) 2>/dev/null && alive=1
   tp_want && on=1; rec_want && on=1
   if [ $on = 1 ] && [ $alive = 0 ]; then bg game_wd_sup
@@ -2453,7 +2468,7 @@ game_wd_sup(){
     _p=$([ -f $DIR/game.pid ] && cat $DIR/game.pid 2>/dev/null)
     if [ -n "$_p" ] && kill -0 $_p 2>/dev/null; then sleep 6; continue; fi
     # cek masih perlu pemantau: ada fitur game yang ON
-    _on=0; for f in preload gamednd gameprofile gameclean gamebypass gamethermal fpsgooff framepace gamecam gamecall; do [ "$(getcfg F_$f)" = on ] && _on=1; done
+    _on=0; for f in preload gamednd gameprofile gameclean gamebypass gamethermal fpsgooff framepace gamecam gamecall; do [ "$(getcfg F_$f)" = on ] && _on=1; done; gp_any && _on=1
     tp_want && _on=1; rec_want && _on=1
     [ "$_on" = 1 ] || return 0
     bg game_wd; sleep 6
