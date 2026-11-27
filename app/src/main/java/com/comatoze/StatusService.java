@@ -190,13 +190,16 @@ public class StatusService extends Service {
 
         boolean limited = a.length > 13 && "1".equals(a[13]);   // penjaga suhu sedang membatasi Performa
         String title = "Mode " + name + (limited ? " (dibatasi suhu)" : auto ? " (otomatis)" : "");
-        String text = "Thermal " + (thermalOff ? "dimatikan" : "normal") + "  \u00B7  " + temp + "\u00B0C  \u00B7  Baterai " + bat + "%" + (chg ? " (mengisi)" : "");
+        String text = chg
+                ? "\u26A1 Mengisi " + bat + "%  \u00B7  " + temp + "\u00B0C  \u00B7  Thermal " + (thermalOff ? "mati" : "normal")
+                : "Thermal " + (thermalOff ? "dimatikan" : "normal") + "  \u00B7  " + temp + "\u00B0C  \u00B7  Baterai " + bat + "%";
 
         String key = title + "|" + text + "|" + rs;
         if (key.equals(lastKey)) return;
         lastKey = key;
 
         Notification.Builder b = base(title, text);
+        if (chg) b.setProgress(100, Math.max(0, Math.min(100, bat)), false);   // bilah progres solid saat mengisi
         if (!"perf".equals(mode)) b.addAction(act("Performa", "perf", 1));
         if (!"balance".equals(mode)) b.addAction(act("Seimbang", "balance", 2));
         if (!"eco".equals(mode)) b.addAction(act("Eco", "eco", 3));

@@ -17,6 +17,8 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -62,6 +64,23 @@ public class MainActivity extends Activity {
         rootView.setBackgroundColor(Color.parseColor("#101412"));
         setContentView(rootView);
 
+        getWindow().setStatusBarColor(Color.parseColor("#080C0A"));
+        getWindow().setNavigationBarColor(Color.parseColor("#080C0A"));
+        if (getSharedPreferences("cz", MODE_PRIVATE).getBoolean("rootok", false)) {
+            // Root pernah diberikan: langsung buka manager, layar pemeriksaan tidak ditampilkan lagi.
+            fast = true;
+            startWeb();
+            checkRoot();
+        } else {
+            ensureGate();
+        }
+    }
+
+    private boolean fast = false;
+    private boolean gateForced = false;
+
+    private void ensureGate() {
+        if (gate != null) return;
         gate = new WebView(this);
         gate.setBackgroundColor(Color.parseColor("#080C0A"));
         gate.getSettings().setJavaScriptEnabled(true);
@@ -70,8 +89,6 @@ public class MainActivity extends Activity {
             @Override public void onPageFinished(WebView v, String url) { checkRoot(); }
         });
         rootView.addView(gate, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        getWindow().setStatusBarColor(Color.parseColor("#080C0A"));
-        getWindow().setNavigationBarColor(Color.parseColor("#080C0A"));
         gate.loadUrl("file:///android_asset/gate.html");
     }
 
@@ -82,11 +99,11 @@ public class MainActivity extends Activity {
     private void checkRoot() {
         if (checking) return;
         checking = true;
-        gateState("wait");
+        if (!fast) gateState("wait");
         pool.execute(new Runnable() {
             @Override public void run() {
                 final boolean root = Root.available();
-                if (root) gateState("mod");
+                if (root && !fast) gateState("mod");
                 final boolean mod = root && Root.exec("test -f " + Root.MOD + "/webroot/index.html").code == 0;
                 if (root && mod) Root.exec(Root.BIN + " appperm");
                 if (root && mod) {
@@ -95,11 +112,27 @@ public class MainActivity extends Activity {
                 ui.post(new Runnable() {
                     @Override public void run() {
                         checking = false;
+                        if (root && mod) getSharedPreferences("cz", MODE_PRIVATE).edit().putBoolean("rootok", true).apply();
+                        if (fast) {
+                            if (root && mod) return;
+                            // Akses root hilang / modul tidak ada: tampilkan layar pemeriksaan sekali, lalu lanjut seperti biasa.
+                            getSharedPreferences("cz", MODE_PRIVATE).edit().putBoolean("rootok", false).apply();
+                            fast = false; gateForced = true;
+                            ensureGate();
+                            return;
+                        }
                         if (!root) gateState("denied");
                         else if (!mod) gateState("nomod");
                         else {
                             gateState("ok");
-                            ui.postDelayed(new Runnable() { @Override public void run() { if (wv == null) startWeb(); } }, 800);
+                            ui.postDelayed(new Runnable() { @Override public void run() {
+                                if (wv == null) startWeb();
+                                else if (gateForced) {
+                                    gateForced = false;
+                                    if (gate != null) { rootView.removeView(gate); gate.destroy(); gate = null; }
+                                    wv.reload();
+                                }
+                            } }, 800);
                         }
                     }
                 });
@@ -111,6 +144,23 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void retry() {
             ui.post(new Runnable() { @Override public void run() { checkRoot(); } });
         }
+    }
+
+    private static final int REQ_PICK = 4107;
+    private ValueCallback<Uri[]> fileCb;
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        if (req == REQ_PICK) {
+            if (fileCb != null) {
+                Uri[] r = null;
+                if (res == RESULT_OK && data != null && data.getData() != null) r = new Uri[]{data.getData()};
+                fileCb.onReceiveValue(r);
+                fileCb = null;
+            }
+            return;
+        }
+        super.onActivityResult(req, res, data);
     }
 
     private int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + 0.5f); }
@@ -148,11 +198,26 @@ public class MainActivity extends Activity {
                 ui.postDelayed(new Runnable() { @Override public void run() { bars(); } }, 700);
             }
         });
+        // Pemilih gambar dari galeri (latar belakang kustom): <input type=file> di WebView butuh ini
+        wv.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
+                fileCb = cb;
+                try {
+                    Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                    i.addCategory(Intent.CATEGORY_OPENABLE);
+                    i.setType("image/*");
+                    startActivityForResult(Intent.createChooser(i, "Pilih gambar"), REQ_PICK);
+                } catch (Exception e) { fileCb = null; return false; }
+                return true;
+            }
+        });
         rootView.addView(wv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         wv.loadUrl("https://" + HOST + "/index.html");
         ui.postDelayed(new Runnable() {
             @Override public void run() {
-                if (gate != null) { rootView.removeView(gate); gate.destroy(); gate = null; }
+                if (gate != null && !gateForced) { rootView.removeView(gate); gate.destroy(); gate = null; }
             }
         }, 900);
     }
@@ -160,7 +225,7 @@ public class MainActivity extends Activity {
     /** Warna status bar / nav bar mengikuti latar halaman (terang/gelap). */
     private void bars() {
         if (wv == null) return;
-        wv.evaluateJavascript("getComputedStyle(document.body).backgroundColor", new android.webkit.ValueCallback<String>() {
+        wv.evaluateJavascript("getComputedStyle(document.documentElement).backgroundColor", new android.webkit.ValueCallback<String>() {
             @Override public void onReceiveValue(String v) {
                 if (v == null) return;
                 Matcher m = Pattern.compile("(\\d+)\\D+(\\d+)\\D+(\\d+)").matcher(v);

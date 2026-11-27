@@ -59,7 +59,7 @@ cpu_mode(){
     [ -z "$fr" ] && fr="$imin $imax"
     case $1 in
       perf) g=$(pick "$av" scarlet performance turbo schedutil walt); mx=$imax; mn=$imax;;
-      eco)  g=$(pick "$av" schedutil walt interactive powersave); mx=$(cap $((ist*60/100)) $fr); mn=$imin;;   # Eco tetap dihitung dari batas stok
+      eco)  g=$(pick "$av" schedutil sugov_ext walt interactive powersave); mx=$(cap $((ist*60/100)) $fr); mn=$imin;;   # Eco tetap dihitung dari batas stok
       plite) g=$(pick "$av" schedutil walt interactive ondemand); mx=$(cap $((imax*82/100)) $fr); mn=$(cap $((imax*30/100)) $fr);;   # Performa Lite: lantai clock naik (responsif), atap 82% (tidak brutal, lebih hemat)
       *)    g=$(pick "$av" schedutil walt interactive ondemand); mx=$imax; mn=$imin;;
     esac
@@ -1916,6 +1916,7 @@ probe(){
   for d in mtk-mst-div-chg mtk-slv-div-chg mtk-master-charger mtk-slave-charger charger; do echo "  [$d] input_current_limit=$(rd $PS/$d/input_current_limit) constant_charge_current_max=$(rd $PS/$d/constant_charge_current_max) online=$(rd $PS/$d/online)"; done
   echo "kandidat yang ada di perangkat:"
   chg_cands | awk '!s[$0]++' | while IFS='|' read -r a b c; do [ -e "$a" ] && echo "  $a = $(rd $a) (stop=$b)"; done
+  echo "== TEKSTUR (ANGLE) =="; tex_diag 2>&1
   echo "== IO / MEM =="
   for b in /sys/block/sda /sys/block/mmcblk0; do [ -f $b/queue/scheduler ] && echo "$(basename $b): $(cat $b/queue/scheduler)"; done
   echo "zram: $(rd /sys/block/zram0/disksize) swappiness=$(rd /proc/sys/vm/swappiness)"
@@ -2131,18 +2132,29 @@ pid_top(){ # <pid>: proses di depan? (cpuctl top-app, cpuset /top-app, oom_score
 game_fgp(){ # game dari daftar yang sedang di layar -> "paket pid" (deteksi langsung dari cpuctl top-app: murah & akurat)
   [ -s $DIR/games.txt ] || return 0
   _tps=" $(top_tasks) "
+  # Lintasan 1 (ketat): hanya proses yang BENAR-BENAR top-app, dicek untuk SEMUA game dulu. Dulu game urutan pertama yang lolos cek longgar
+  # (oom_score_adj/cgroup) menang walau game lain yang di depan -> profil game kedua tidak pernah terpasang setelah pindah game.
   while IFS= read -r g; do
     [ -n "$g" ] || continue
     for pid in $(pidof $g 2>/dev/null); do
       case "$_tps" in *" $pid "*) echo "$g $pid"; return 0;; esac
-      pid_top $pid && { echo "$g $pid"; return 0; }
     done
   done < $DIR/games.txt
+  # Lintasan 2 (longgar): cek oom/cpuset/cgroup; bila ada >1 game lolos, pilih yang paling baru dibuka (pid terbesar)
+  _bg=; _bp=0
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    for pid in $(pidof $g 2>/dev/null); do
+      pid_top $pid && [ "$pid" -gt "$_bp" ] && { _bg=$g; _bp=$pid; }
+    done
+  done < $DIR/games.txt
+  [ -n "$_bg" ] && echo "$_bg $_bp"
+  return 0
 }
 game_fg(){ set -- $(game_fgp); echo $1; }
 glog(){ echo "$(date +%H:%M:%S) $*" >> $DIR/game.log; [ "$(stat -c %s $DIR/game.log 2>/dev/null || echo 0)" -gt 4096 ] && { tail -n 20 $DIR/game.log > $DIR/game.log.t; mv -f $DIR/game.log.t $DIR/game.log; }; }
 # ---------- CEK VERSI: bukti versi mana yang SEBENARNYA terpasang & jalan (modul, WebUI, aplikasi) ----------
-SCRIPT_VER=2.99.1
+SCRIPT_VER=2.100.5
 ver_check(){
   echo "skrip_berjalan=$SCRIPT_VER ($SELF)"
   for d in /data/adb/modules /data/adb/modules_update; do
@@ -2370,7 +2382,13 @@ fp_support(){ _sc=0; _sg=0; _si=0
 # Setiap ~30 dtk: ukur 2 dtk, ambil 3 thread TERSIBUK dari proses game, kunci ke inti tercepat (cluster big) + naikkan prioritasnya.
 # Thread lain dibiarkan bebas (tidak ada pin massal). Dilewati bila HP hanya punya satu cluster atau taskset tidak ada.
 tp_want(){ [ "$(getcfg F_threadpin)" != off ]; }
-big_mask(){ _bf=0; _lo=999999999; _cl=
+big_mask(){ _mc=0; _cm=0
+  for _d in /sys/devices/system/cpu/cpu[0-9]*; do read -r _c 2>/dev/null < $_d/cpu_capacity; case $_c in ''|*[!0-9]*) _mc=0; break;; esac; [ "$_c" -gt "$_mc" ] && _mc=$_c; done
+  if [ "$_mc" -gt 0 ]; then   # kapasitas per-CPU tersedia: semua inti >=60% kapasitas tertinggi (sedang+prime, bukan prime saja)
+    for _d in /sys/devices/system/cpu/cpu[0-9]*; do _n=${_d##*cpu}; read -r _c < $_d/cpu_capacity; [ $((_c*100)) -ge $((_mc*60)) ] && _cm=$((_cm | (1 << _n))); done
+    [ "$_cm" -gt 0 ] && { printf '%x' $_cm; return 0; }
+  fi
+  _bf=0; _lo=999999999; _cl=
   for _p in /sys/devices/system/cpu/cpufreq/policy*; do _mf=; _ac=; read -r _mf 2>/dev/null < $_p/cpuinfo_max_freq; read -r _ac 2>/dev/null < $_p/affected_cpus
     case $_mf in ''|*[!0-9]*) continue;; esac
     [ "$_mf" -gt "$_bf" ] && _bf=$_mf; [ "$_mf" -lt "$_lo" ] && _lo=$_mf
@@ -2394,6 +2412,8 @@ tpin(){ _pid=$1; [ -d /proc/$_pid ] || return 0; command -v taskset >/dev/null 2
   _top=$_top2
   [ "$_n" -gt 0 ] && glog "thread sibuk -> inti besar (mask $_mk): $_top"
   rm -f $DIR/tpin.lock $DIR/tp.a $DIR/tp.b; }
+game_top_am(){ # cadangan: apakah paket $1 masih activity yang sedang di depan (dumpsys). Dipakai hanya saat deteksi cpuctl gagal sesaat.
+  dumpsys activity activities 2>/dev/null | grep -m1 -E 'topResumedActivity|ResumedActivity' | grep -q " $1/"; }
 game_wd(){
   echo $$ > $DIR/game.pid; ing=0; dset=0; away=0; lastg=; gpid=
   gp_leave; gth_off; gcam_off; gcall_off; fp_off; rm -f $DIR/ingame   # sisa profil/thermal/kamera/teleponi dari pemantau sebelumnya dipulihkan dulu
@@ -2406,16 +2426,18 @@ game_wd(){
     else
       set -- $(game_fgp); cur=$1; gpid=$2
     fi
+    # deteksi cpuctl gagal sesaat padahal game masih hidup & di depan (proses lain, dialog, gesture): JANGAN dianggap keluar -> profil tidak 'mental' ke mode biasa
+    if [ "$ing" = 1 ] && [ -z "$cur" ] && [ -n "$lastpid" ] && kill -0 $lastpid 2>/dev/null && game_top_am "$lastg"; then cur=$lastg; gpid=$lastpid; away=0; fi
     cfgv F_fpsgooff; [ "$CV" = on ] && fpsgo_keep
     if [ "$ing" = 1 ] && [ -n "$gpid" ]; then tpn=$((${tpn:-0}+1)); if [ "$tpn" -ge 10 ] && tp_want; then tpn=0; ( tpin $gpid ) </dev/null >/dev/null 2>&1 & fi; fi
     fpn=$((${fpn:-0}+1)); [ $((fpn % 10)) = 0 ] && [ "$ing" = 1 ] && [ -f $DIR/fp_on ] && ( fp_on ) >/dev/null 2>&1 &   # ROM/kernel sering menimpa balik: tegaskan lagi tiap ~30 dtk
-    if [ "$ing" = 1 ] && [ -n "$cur" ] && [ "$cur" = "$lastg" ] && [ -n "$gpid" ] && [ -n "$lastpid" ] && [ "$gpid" != "$lastpid" ]; then
+    if [ "$ing" = 1 ] && [ -n "$cur" ] && [ "$cur" = "$lastg" ] && [ -n "$gpid" ] && [ -n "$lastpid" ] && [ "$gpid" != "$lastpid" ] && ! kill -0 $lastpid 2>/dev/null; then
       # game mati lalu dibuka ulang (pid baru) sebelum 15 dtk: dulu dianggap 'masih di dalam game' sehingga mode Performa TIDAK dipasang lagi
       en=$(date +%s); [ $((en-${et:-0})) -lt 75 ] && { crash=$((${crash:-0}+1)); glog "game berhenti mendadak ($crash)"; [ $crash -ge 2 ] && { gfx_safe; crash=0; }; }
       gp_leave; gth_off; fp_off; rm -f $DIR/ingame; ing=0; glog "game dibuka ulang"
     fi
     if [ -n "$cur" ]; then
-      away=0
+      away=0; [ "$ing" = 1 ] && [ "$cur" = "$lastg" ] && [ -n "$lastpid" ] && kill -0 $lastpid 2>/dev/null && gpid=$lastpid
       if [ "$ing" = 0 ]; then
         ing=1; echo "$cur" > $DIR/ingame   # isi = paket game (dipakai notifikasi status)
         et=$(date +%s); lastg=$cur; lastpid=$gpid; tpn=6   # pin thread sibuk pertama ~12 dtk setelah masuk (setelah game selesai memuat)
@@ -2441,7 +2463,7 @@ game_wd(){
       fi
     elif [ "$ing" = 1 ]; then
       away=$((away+1))
-      if [ $away -ge 5 ]; then   # keluar game bila 5x cek berturut-turut (~15 dtk) (anti-flicker shade/dialog/pemuatan)
+      if [ $away -ge 8 ]; then   # keluar game bila 8x cek berturut-turut (~24 dtk) (anti-flicker shade/dialog/pemuatan)
         ing=0; rm -f $DIR/ingame; gp_leave; gth_off; gcam_off; gcall_off; fp_off; glog "keluar ${lastg}"
         [ "$(getcfg F_preload)" = on ] && ( sleep 20; preload $lastg ) </dev/null >/dev/null 2>&1 &   # panaskan cache untuk pembukaan berikutnya, saat RAM lega (bukan saat game dimuat)
         # penjaga render: game mati (bukan sekadar pindah app) dalam ~60 dtk setelah dibuka, 2x berturut-turut -> kembalikan setelan render bawaan
@@ -2849,6 +2871,18 @@ tex_verify(){ # cek hasil nyata: daftar ANGLE sistem memuat paket & properti ove
   case "$_p" in *",$1,"*) ;; *) echo "ERR|sistem menolak daftar ANGLE (angle_gl_driver_selection_pkgs kosong)$(angle_ok_r || echo '; ANGLE tidak terdeteksi di HP ini')"; return 1;; esac
   [ "$_g" = "$_w" ] || { echo "ERR|properti override tidak menempel (baca: ${_g:-kosong}) - ROM memblokir setprop debug.angle"; return 1; }
   echo OK; }
+tex_diag(){ # apa ANGLE benar-benar dimuat game? (tanpa ANGLE, filter tekstur tidak berpengaruh)
+  echo "angle_gl_driver_selection_pkgs=$(sget global angle_gl_driver_selection_pkgs)"
+  echo "angle_gl_driver_selection_values=$(sget global angle_gl_driver_selection_values)"
+  echo "debug.angle.feature_overrides_enabled=$(getprop debug.angle.feature_overrides_enabled)"
+  echo "ro.gfx.angle.supported=$(getprop ro.gfx.angle.supported) | angle_ok=$(angle_ok_r && echo ya || echo tidak)"
+  for _q in $(cat $AAP 2>/dev/null); do _pid=$(pidof $_q 2>/dev/null | cut -d' ' -f1)
+    echo "[$_q] TEX=$(getcfg TEX_$_q) fitur=$(tex_feat $_q) skala=$(getcfg GFXS_$_q)"
+    if [ -n "$_pid" ]; then
+      _m=$(cat /proc/$_pid/maps 2>/dev/null)
+      echo "   pid=$_pid ANGLE_dimuat=$(echo "$_m" | grep -c 'angle') GLES_mali=$(echo "$_m" | grep -c 'libGLES_mali') vulkan=$(echo "$_m" | grep -c 'libvulkan')"
+    else echo "   (game tidak berjalan)"; fi
+  done; }
 tex(){ # set <paket> <1-4> <blur|pixel|blok> | off <paket> | cur <paket>
   case $1 in
     set) angle_pkg_ok "$2" || { echo "ERR|nama paket tidak valid"; return 1; }
@@ -2857,11 +2891,17 @@ tex(){ # set <paket> <1-4> <blur|pixel|blok> | off <paket> | cur <paket>
          new=0; [ -f $AAP ] || : > $AAP
          if ! grep -qx "$2" $AAP; then new=1; setcfg "TEXA_$2" 1; echo "$2" >> $AAP; fi
          setcfg "TEX_$2" "$3|$4"; echo "$2" > $DIR/tex_cur
+         # Efek harus TERLIHAT di seluruh gambar (bukan hanya tekstur dekat): turunkan juga resolusi render game. Blur = upscale halus; Pixel/Blok = resolusi rendah + filter terdekat (kotak-kotak). Level 4 = paling burik.
+         # Pixel/Blok TIDAK menurunkan resolusi: Android memperbesar gambar resolusi-rendah dengan interpolasi halus (hasilnya BLUR). Kotak tajam hanya datang dari filter tekstur terdekat.
+         # Blur memang ingin kabur: resolusi turun sesuai level.
+         case $4 in blur) sv=$(echo "100 85 68 52" | cut -d' ' -f$3); setcfg "TEXS_$2" 1; gfx_scale "$2" "$sv" >/dev/null 2>&1;;
+           *) if [ "$(getcfg "TEXS_$2")" = 1 ]; then gfx_scale "$2" 100 >/dev/null 2>&1; grep -v "^TEXS_$2=" $CFG > $CFG.t 2>/dev/null; mv -f $CFG.t $CFG; fi;; esac
          [ $new = 1 ] && angle_compose; angle_prop_apply; am force-stop "$2" >/dev/null 2>&1
          [ $new = 1 ] && ui_restart
          tex_verify "$2";;
     off) angle_pkg_ok "$2" || { echo "ERR|nama paket tidak valid"; return 1; }
          auto=$(getcfg "TEXA_$2"); tex_forget "$2"
+         [ "$(getcfg "TEXS_$2")" = 1 ] && { gfx_scale "$2" 100 >/dev/null 2>&1; grep -v "^TEXS_$2=" $CFG > $CFG.t 2>/dev/null; mv -f $CFG.t $CFG; }
          if [ "$auto" = 1 ]; then angle_app del "$2" >/dev/null; ui_restart; else angle_prop_apply; am force-stop "$2" >/dev/null 2>&1; fi
          echo OK;;
     cur) angle_pkg_ok "$2" && tex_cur "$2"; echo OK;;
@@ -2903,18 +2943,23 @@ trim_run(){ ( for m in /data /cache /metadata; do [ -d $m ] && fstrim $m >/dev/n
 pct_ok(){ case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
 pf(){ printf '%d.%02d' $(( $1 / 100 )) $(( $1 % 100 )); }   # 125 -> 1.25
 color_apply(){
-  s=$(getcfg COL_SAT); r=$(getcfg COL_R); g=$(getcfg COL_G); b=$(getcfg COL_B)
-  s=${s:-100}; r=${r:-100}; g=${g:-100}; b=${b:-100}
+  s=$(getcfg COL_SAT); r=$(getcfg COL_R); g=$(getcfg COL_G); b=$(getcfg COL_B); c=$(getcfg COL_CON); l=$(getcfg COL_BRI); w=$(getcfg COL_WRM)
+  s=${s:-100}; r=${r:-100}; g=${g:-100}; b=${b:-100}; c=${c:-100}; l=${l:-100}; w=${w:-0}
   service call SurfaceFlinger 1022 f $(pf $s) >/dev/null 2>&1
-  if [ "$r$g$b" = 100100100 ]; then service call SurfaceFlinger 1015 i32 0 >/dev/null 2>&1
-  else service call SurfaceFlinger 1015 i32 1 f $(pf $r) f 0 f 0 f 0 f 0 f $(pf $g) f 0 f 0 f 0 f 0 f $(pf $b) f 0 f 0 f 0 f 0 f 1 >/dev/null 2>&1; fi
+  if [ "$r$g$b$c$l$w" = 1001001001001000 ]; then service call SurfaceFlinger 1015 i32 0 >/dev/null 2>&1
+  else   # matriks: skala = gain kanal x kecerahan x kontras (+ suhu: merah naik/biru turun), geser = 0.5(1-kontras)
+    set -- $(awk -v r=$r -v g=$g -v b=$b -v c=$c -v l=$l -v w=$w 'BEGIN{k=c/100; o=0.5*(1-k); printf "%.3f %.3f %.3f %.3f", r/100*l/100*k*(1+w/250), g/100*l/100*k, b/100*l/100*k*(1-w/250), o}')
+    service call SurfaceFlinger 1015 i32 1 f $1 f 0 f 0 f 0 f 0 f $2 f 0 f 0 f 0 f 0 f $3 f 0 f $4 f $4 f $4 f 1 >/dev/null 2>&1; fi
 }
-color_set(){ # saturasi% r% g% b%
-  pct_ok "$1" 50 200 && pct_ok "$2" 50 100 && pct_ok "$3" 50 100 && pct_ok "$4" 50 100 || { echo "ERR|nilai di luar batas"; return 1; }
-  setcfg COL_SAT $1; setcfg COL_R $2; setcfg COL_G $3; setcfg COL_B $4; color_apply; echo OK
+color_set(){ # sat% r% g% b% [kontras% kecerahan% suhu]
+  pct_ok "$1" 0 250 && pct_ok "$2" 30 100 && pct_ok "$3" 30 100 && pct_ok "$4" 30 100 || { echo "ERR|nilai di luar batas"; return 1; }
+  _c=${5:-100}; _l=${6:-100}; _w=${7:-0}
+  pct_ok "$_c" 50 150 && pct_ok "$_l" 50 120 || { echo "ERR|nilai di luar batas"; return 1; }
+  case $_w in -[0-9]*|[0-9]*) ;; *) echo "ERR|suhu tidak valid"; return 1;; esac; [ "$_w" -ge -50 ] && [ "$_w" -le 50 ] || { echo "ERR|suhu -50..50"; return 1; }
+  setcfg COL_SAT $1; setcfg COL_R $2; setcfg COL_G $3; setcfg COL_B $4; setcfg COL_CON $_c; setcfg COL_BRI $_l; setcfg COL_WRM $_w; color_apply; echo OK
 }
-color_reset(){ for k in COL_SAT COL_R COL_G COL_B; do grep -v "^$k=" $CFG > $CFG.t; mv $CFG.t $CFG; done; color_apply; echo OK; }
-color_boot(){ [ -n "$(getcfg COL_SAT)$(getcfg COL_R)$(getcfg COL_G)$(getcfg COL_B)" ] && color_apply; return 0; }
+color_reset(){ for k in COL_SAT COL_R COL_G COL_B COL_CON COL_BRI COL_WRM; do grep -v "^$k=" $CFG > $CFG.t; mv $CFG.t $CFG; done; color_apply; echo OK; }
+color_boot(){ [ -n "$(getcfg COL_SAT)$(getcfg COL_R)$(getcfg COL_G)$(getcfg COL_B)$(getcfg COL_CON)$(getcfg COL_BRI)$(getcfg COL_WRM)" ] && color_apply; return 0; }
 dbg_off(){ cmd looper_stats disable >/dev/null 2>&1; dumpsys binder_calls_stats --disable >/dev/null 2>&1; dumpsys binder_calls_stats --disable-detailed-tracking >/dev/null 2>&1; atrace --async_stop >/dev/null 2>&1
   for _t in /sys/kernel/tracing/tracing_on /sys/kernel/debug/tracing/tracing_on /sys/kernel/tracing/buffer_size_kb /sys/kernel/debug/tracing/buffer_size_kb; do [ -w $_t ] && echo 0 > $_t 2>/dev/null; done
   setprop debug.atrace.tags.enableflags 0 >/dev/null 2>&1
@@ -2972,8 +3017,8 @@ ram_keep(){ _kp="com.comatoze $(game_fg)"
 # "mesin cukur" ~1 dtk dan hentakan layar. Juga dilewati total bila ada game dari Daftar Game yang sedang berjalan.
 ram_compact(){ _keep=" $(ram_keep) "; _ua=" $(pm list packages -3 2>/dev/null | sed 's/^package://' | tr '\n' ' ') "
   for _g in $(cat $DIR/games.txt 2>/dev/null); do pidof $_g >/dev/null 2>&1 && return 0; done
-  for _n in $(ps -A -o NAME 2>/dev/null | grep '\.' | sort -u | head -n 90); do _b=${_n%%:*}; case "$_keep" in *" $_b "*) continue;; esac; case "$_ua" in *" $_b "*) ;; *) continue;; esac
-    cmd activity compact full "$_n" 0 >/dev/null 2>&1 || am compact full "$_n" 0 >/dev/null 2>&1; done; }
+  for _n in $(ps -A -o NAME 2>/dev/null | grep '\.' | sort -u | head -n 60); do [ "${_cn:-0}" -ge 15 ] && break; _b=${_n%%:*}; case "$_keep" in *" $_b "*) continue;; esac; case "$_ua" in *" $_b "*) ;; *) continue;; esac
+    _cn=$((${_cn:-0}+1)); cmd activity compact some "$_n" 0 >/dev/null 2>&1 || am compact some "$_n" 0 >/dev/null 2>&1; sleep 0.4; done; }
 # ram_purge full|light: full = SANGAT AGRESIF: hentikan semua app pihak ketiga yang berjalan (selain ram_keep) dua putaran (yang hidup lagi dari alarm/service ikut kena),
 # bunuh proses cache, pangkas cache, padatkan proses sisa, lalu buang page cache/slab & padatkan memori kernel dua kali; light = hanya proses cache + cache kernel.
 # Urutan sengaja: matikan proses dulu, baru pangkas/padatkan, flush, buang cache (supaya blok kontigu besar tersedia lagi).
@@ -2987,15 +3032,14 @@ ram_purge(){
   fi
   am kill-all >/dev/null 2>&1; cmd activity kill-all >/dev/null 2>&1
   if [ "$1" = full ]; then pm trim-caches 999G >/dev/null 2>&1; ram_compact; fi
-  sync; w 3 /proc/sys/vm/drop_caches; w 1 /proc/sys/vm/compact_memory
-  [ "$1" = full ] && sleep 1
-  w 3 /proc/sys/vm/drop_caches
-  [ -w /proc/sys/vm/compact_memory ] && w 1 /proc/sys/vm/compact_memory
+  # JANGAN tulis compact_memory / drop_caches=3: kompaksi memori seluruh sistem + buang slab menahan lock zona beberapa detik -> UI freeze, suara "mesin cukur", watchdog reboot (diduga kuat dari laporan). Cukup buang page cache (1).
+  [ "$1" = full ] && sync
+  w 1 /proc/sys/vm/drop_caches
 }
 qact(){ case $1 in
   clean) _b=$(meminfo_kb MemAvailable); ram_purge full; sleep 2; _a=$(meminfo_kb MemAvailable); _f=$(( (_a-_b)/1024 )); [ "$_f" -lt 0 ] && _f=0
     echo "OK|RAM dibersihkan (+${_f} MB)";;
-  trim) pm trim-caches 999G >/dev/null 2>&1; sync; w 3 /proc/sys/vm/drop_caches; w 1 /proc/sys/vm/compact_memory; cmd package bg-dexopt-job >/dev/null 2>&1 & echo "OK|cache dipangkas";;
+  trim) pm trim-caches 999G >/dev/null 2>&1; sync; w 1 /proc/sys/vm/drop_caches; cmd package bg-dexopt-job >/dev/null 2>&1 & echo "OK|cache dipangkas";;
   killbg) ram_purge full; echo "OK|aplikasi latar dihentikan";;
   *) echo "ERR|aksi tidak dikenal";;
 esac; }
@@ -3148,17 +3192,17 @@ idleram_fast(){ echo $$ > $IDF.pid
     [ -f $DIR/ingame ] && { sleep 4; continue; }
     _gr=0; for _g in $(cat $DIR/games.txt 2>/dev/null); do pidof $_g >/dev/null 2>&1 && { _gr=1; break; }; done   # game masih hidup (mis. baru dibuka/di latar): jangan bersihkan
     [ $_gr = 1 ] && { sleep 5; continue; }
-    read -r _up _ < /proc/uptime; _up=${_up%.*}; [ $((_up-${_lastp:-0})) -lt 90 ] && { sleep 3; continue; }   # jeda minimal 90 dtk antar pembersihan penuh (cegah bersih berulang tiap 2 dtk)
+    read -r _up _ < /proc/uptime; _up=${_up%.*}; [ $((_up-${_lastp:-0})) -lt 300 ] && { sleep 5; continue; }   # jeda minimal 5 menit antar pembersihan (dulu 90 dtk: bersih terus-menerus = freeze & app tertutup sendiri)
     _m=$(getcfg IDLE_MIN); case $_m in ""|*[!0-9]*) _m=2048;; esac
-    _t=$(meminfo_kb MemTotal); _t=${_t:-0}; _thr=$((_t*35/100/1024)); [ "$_thr" -lt "$_m" ] && _thr=$_m   # ambang 35% dari total, minimal IDLE_MIN
+    _t=$(meminfo_kb MemTotal); _t=${_t:-0}; _thr=$((_t*20/100/1024)); [ "$_thr" -lt "$_m" ] && _thr=$_m   # ambang 20% dari total, minimal IDLE_MIN
     _fa=$(meminfo_kb MemAvailable); _fa=$((_fa/1024))
     if [ "$_fa" -lt "$_thr" ]; then
       ram_purge light; _fb=$(meminfo_kb MemAvailable); _fb=$((_fb/1024))
-      if [ "$_fb" -lt "$_thr" ]; then ram_purge full; _fb=$(meminfo_kb MemAvailable); _fb=$((_fb/1024)); fi
+      if [ "$_fb" -lt $((_thr/2)) ]; then ram_purge full; _fb=$(meminfo_kb MemAvailable); _fb=$((_fb/1024)); fi
       read -r _lastp _ < /proc/uptime; _lastp=${_lastp%.*}
       echo "$(date +%H:%M:%S) [fast] ${_fa}MB < ${_thr}MB -> ${_fb}MB" > $DIR/idleram.last
     fi
-    sleep 2
+    sleep 4
   done
   rm -f $IDF.pid; }
 idleram_run(){ echo $$ > $DIR/idleram.pid
@@ -3199,7 +3243,7 @@ status(){
   echo "RATES|$(rates)"
   echo "GPCFG|$(getcfg GP_MODE)|$(getcfg GP_HZ)"
   echo "GFX|$(getcfg GFX_SCALE)|$(getcfg GFX_DRV)|$(getcfg GFX_ANGLE)"
-  echo "COLOR|$(getcfg COL_SAT)|$(getcfg COL_R)|$(getcfg COL_G)|$(getcfg COL_B)"
+  echo "COLOR|$(getcfg COL_SAT)|$(getcfg COL_R)|$(getcfg COL_G)|$(getcfg COL_B)|$(getcfg COL_CON)|$(getcfg COL_BRI)|$(getcfg COL_WRM)"
   tex_status
   echo "ANGLE|x|$(angle_ok && echo yes || echo no)|$(cat $AAP 2>/dev/null | tr '\n' ';' | sed 's/;$//')"
   echo "DNS|$(getcfg DNS)|$(getcfg DNS_H)|$(sget global private_dns_mode)|$(sget global private_dns_specifier)"
@@ -3324,7 +3368,7 @@ case "$1" in
   gfx_scale_reset) gfx_scale_reset $2;;
   gfx_driver) gfx_driver $2; ui_restart;;
   gfx_angle) gfx_angle $2; ui_restart;;
-  tex) tex $2 $3 $4 $5;;
+  tex) case $2 in diag) tex_diag;; *) tex $2 $3 $4 $5;; esac;;
   texcur) tex cur $2;;
   angle_app) angle_app $2 $3; ui_restart;;
   idleram) idleram $2 $3 $4;;
@@ -3333,7 +3377,7 @@ case "$1" in
   uirst) case $2 in on|off) setcfg UI_RST $2; echo "OK|restart UI $2";; now) rm -f $DIR/uirst; setcfg UI_RST on; ui_restart; echo "OK|UI dimuat ulang";; *) echo "UIRST|$(getcfg UI_RST)";; esac;;
   cache) cache_clean;;
   trim) trim_run;;
-  color) case $2 in set) color_set $3 $4 $5 $6;; reset) color_reset;; *) echo "ERR|perintah color tidak dikenal";; esac;;
+  color) case $2 in set) color_set $3 $4 $5 $6 $7 $8 $9;; reset) color_reset;; *) echo "ERR|perintah color tidak dikenal";; esac;;
   gp_cfg) setcfg GP_$(echo $2 | tr a-z A-Z) $3;;
   gp_game) gp_game $2 $3 $4;;
   gdiag) gdiag;;
